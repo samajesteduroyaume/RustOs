@@ -219,3 +219,4 @@ Pour toute question ou contribution, consultez la documentation fournie ou conta
 **Version**: RustOS v1.1.0 - Device Detection Edition
 **Date**: 6 Décembre 2025
 **Statut**: ✅ Prêt pour Production
+# RustOs
