@@ -1,0 +1,16 @@
+# Cibles Rust
+target/
+**/target/
+
+# Fichiers temporaires
+*.log
+*.swp
+*.tmp
+
+# Artefacts ISO / build
+mini-os/mini-os.iso
+mini-os/isodir/
+
+# Outils IDE
+.vscode/
+.idea/
