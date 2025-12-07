@@ -4,11 +4,31 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["staticlib", "rlib"]
+crate-type = ["rlib"]
+harness = false
+doctest = false  # Tests unitaires ne peuvent pas s'exécuter en mode no_std standard
+
+[[bin]]
+name = "mini-os"
+path = "src/main.rs"
+required-features = ["usb", "bluetooth"]
+
+[[test]]
+name = "ramfs_tests"
+path = "tests/ramfs_tests.rs"
+harness = false
+
+[[bin]]
+name = "test-kernel"
+path = "src/bin/test_kernel.rs"
+test = false
 
 [features]
-default = ["alloc"]
+default = ["alloc", "usb", "bluetooth"]
 alloc = []
+usb = []
+bluetooth = []
+test-mode = []  # Mode test pour QEMU
 
 [dependencies]
 x86_64 = "0.15"
@@ -20,6 +40,7 @@ lazy_static = { version = "1.5.0", features = ["spin_no_std"] }
 log = { version = "0.4.29", default-features = false }
 raw-cpuid = "10.7.0"
 bit_field = "0.10.2"
+uart_16550 = "0.2.0"  # Pour la sortie série dans les tests
 
 # Pour le support de l'allocation
 linked_list_allocator = { version = "0.10.1", optional = true }
@@ -44,3 +65,14 @@ panic = "abort"
 opt-level = 3
 lto = true
 codegen-units = 1
+
+# Configuration bootimage pour les tests QEMU
+[package.metadata.bootimage]
+test-args = [
+    "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+    "-serial", "stdio",
+    "-display", "none",
+    "-no-reboot"
+]
+test-success-exit-code = 33  # (0x10 << 1) | 1
+test-timeout = 300  # 5 minutes

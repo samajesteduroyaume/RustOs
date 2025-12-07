@@ -1,9 +1,11 @@
-/// Bluetooth HCI (Host Controller Interface) Layer
+/// Bluetooth HCI (Host Controller Interface)
 /// 
-/// Gère la communication avec le contrôleur Bluetooth
+/// Ce module implémente le protocole HCI pour communiquer avec les contrôleurs Bluetooth
 
+extern crate alloc;
 use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::format;
 use crate::vga_buffer::WRITER;
 
 /// Types de paquets HCI
@@ -375,7 +377,7 @@ mod tests {
     #[test_case]
     fn test_bd_addr() {
         let addr = BdAddr::new([0x00, 0x1A, 0x7D, 0xDA, 0x71, 0x13]);
-        assert_eq!(addr.into(), "00:1A:7D:DA:71:13");
+        assert_eq!(addr.to_string(), "00:1A:7D:DA:71:13");
     }
 
     #[test_case]
@@ -394,10 +396,11 @@ mod tests {
     #[test_case]
     fn test_acl_header() {
         let header = HciAclHeader::new(0x123, 0x02, 0x00, 100);
+        let data_length = header.data_length;
         assert_eq!(header.handle(), 0x123);
         assert_eq!(header.pb_flag(), 0x02);
         assert_eq!(header.bc_flag(), 0x00);
-        assert_eq!(header.data_length, 100);
+        assert_eq!(data_length, 100);
     }
 
     #[test_case]

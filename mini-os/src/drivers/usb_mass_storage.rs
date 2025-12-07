@@ -1,9 +1,11 @@
-/// USB Mass Storage Driver - Bulk-Only Transport (BOT)
+/// Implémentation du protocole USB Mass Storage (Bulk-Only Transport)
 /// 
-/// Implémente le protocole USB Mass Storage Class avec SCSI
+/// Ce module permet de communiquer avec des périphériques de stockage USB
 
+extern crate alloc;
 use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::{format, vec};
 use super::usb_protocol::*;
 use crate::vga_buffer::WRITER;
 
@@ -196,7 +198,7 @@ impl UsbMassStorageDriver {
         let tag = self.send_command(&command, 36, TransferDirection::DeviceToHost)?;
         
         // TODO: Recevoir les données d'inquiry
-        let mut data = vec![0u8; 36];
+        let data = vec![0u8; 36];
         
         let csw = self.receive_status(tag)?;
         
@@ -343,11 +345,17 @@ mod tests {
         let command = [0x12, 0, 0, 0, 36, 0]; // INQUIRY
         let cbw = CommandBlockWrapper::new(1, 36, TransferDirection::DeviceToHost, 0, &command);
         
-        assert_eq!(cbw.signature, 0x43425355);
-        assert_eq!(cbw.tag, 1);
-        assert_eq!(cbw.data_transfer_length, 36);
-        assert_eq!(cbw.flags, 0x80);
-        assert_eq!(cbw.cb_length, 6);
+        let signature = cbw.signature;
+        let tag = cbw.tag;
+        let data_transfer_length = cbw.data_transfer_length;
+        let flags = cbw.flags;
+        let cb_length = cbw.cb_length;
+        
+        assert_eq!(signature, 0x43425355);
+        assert_eq!(tag, 1);
+        assert_eq!(data_transfer_length, 36);
+        assert_eq!(flags, 0x80);
+        assert_eq!(cb_length, 6);
     }
 
     #[test_case]

@@ -4,6 +4,15 @@ use crate::process::{Process, ProcessManager};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::arch::asm;
 
+pub mod cfs;
+pub use cfs::{CFSScheduler, CFSRunqueue};
+
+pub mod policy;
+pub use policy::{SchedulingPolicy, PolicyStats, CFSPolicy, RoundRobinPolicy};
+
+pub mod config;
+pub use config::{SchedulerConfig, SchedulerPolicyType, SCHEDULER_CONFIG, switch_scheduler_policy, get_current_policy};
+
 /// Algorithme de planification
 #[derive(Debug, Clone, Copy)]
 pub enum SchedulerPolicy {

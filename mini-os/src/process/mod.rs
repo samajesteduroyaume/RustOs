@@ -12,6 +12,63 @@ use spin::Mutex;
 use core::arch::asm;
 use crate::memory::vm::{VMManager, VM_MANAGER};
 
+pub mod elf;
+use self::elf::{ElfFile, PT_LOAD, PF_X, PF_W, PF_R};
+
+pub mod signal;
+use self::signal::{SignalQueue, SignalHandlerTable};
+
+/// Niveau de priorité d'un processus
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ProcessPriority {
+    /// Priorité temps réel (la plus haute)
+    Realtime = 0,
+    /// Priorité haute
+    High = 1,
+    /// Priorité normale (par défaut)
+    Normal = 2,
+    /// Priorité basse
+    Low = 3,
+    /// Priorité idle (la plus basse)
+    Idle = 4,
+}
+
+impl ProcessPriority {
+    /// Convertit un u8 en ProcessPriority
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            0 => ProcessPriority::Realtime,
+            1 => ProcessPriority::High,
+            2 => ProcessPriority::Normal,
+            3 => ProcessPriority::Low,
+            _ => ProcessPriority::Idle,
+        }
+    }
+
+    /// Convertit ProcessPriority en u8
+    pub fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Retourne le poids du processus pour le scheduler CFS
+    /// Plus la priorité est haute, plus le poids est élevé
+    pub fn weight(self) -> u64 {
+        match self {
+            ProcessPriority::Realtime => 1024,
+            ProcessPriority::High => 512,
+            ProcessPriority::Normal => 256,
+            ProcessPriority::Low => 128,
+            ProcessPriority::Idle => 64,
+        }
+    }
+}
+
+impl Default for ProcessPriority {
+    fn default() -> Self {
+        ProcessPriority::Normal
+    }
+}
+
 /// État d'un processus
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessState {
@@ -36,6 +93,10 @@ pub struct ProcessContext {
     pub registers: [u64; 16],
     /// Pointeur vers la table des pages
     pub page_table: Arc<Mutex<PageTable>>,
+    /// Niveau de privilège (0 = Ring 0, 3 = Ring 3)
+    pub privilege_level: u8,
+    /// Pointeur de pile utilisateur (pour Ring 3)
+    pub user_rsp: u64,
 }
 
 impl Default for ProcessContext {
@@ -45,6 +106,8 @@ impl Default for ProcessContext {
             rip: 0,
             registers: [0; 16],
             page_table: Arc::new(Mutex::new(PageTable::new())),
+            privilege_level: 0, // Ring 0 par défaut
+            user_rsp: 0,
         }
     }
 }
@@ -60,18 +123,28 @@ pub struct Process {
     /// Contexte d'exécution
     pub context: ProcessContext,
     /// Priorité du processus
-    pub priority: u8,
+    pub priority: ProcessPriority,
     /// Adresse de la pile noyau
     pub kstack: Option<PhysAddr>,
     /// ID de l'espace d'adressage
     pub address_space_id: usize,
     /// Pages marquées en lecture seule pour CoW
     pub cow_pages: Vec<PhysFrame>,
+    /// Temps CPU virtuel utilisé (pour CFS scheduler)
+    pub vruntime: u64,
+    /// Temps CPU réel utilisé (en ticks)
+    pub cpu_time: u64,
+    /// Timestamp du dernier scheduling
+    pub last_scheduled: u64,
+    /// Queue de signaux en attente
+    pub signal_queue: SignalQueue,
+    /// Table des handlers de signaux
+    pub signal_handlers: SignalHandlerTable,
 }
 
 impl Process {
     /// Crée un nouveau processus
-    pub fn new(name: &str, _entry_point: fn() -> !, priority: u8) -> Result<Self, &'static str> {
+    pub fn new(name: &str, _entry_point: fn() -> !, priority: ProcessPriority) -> Result<Self, &'static str> {
         // Créer un nouvel espace d'adressage pour le processus
         let address_space_id = VM_MANAGER
             .lock()
@@ -92,7 +165,37 @@ impl Process {
             kstack: None,
             address_space_id,
             cow_pages: Vec::new(),
+            vruntime: 0,
+            cpu_time: 0,
+            last_scheduled: 0,
+            signal_queue: SignalQueue::new(),
+            signal_handlers: SignalHandlerTable::new(),
         })
+    }
+    
+    /// Définit la priorité du processus
+    pub fn set_priority(&mut self, priority: ProcessPriority) {
+        self.priority = priority;
+    }
+    
+    /// Obtient la priorité du processus
+    pub fn get_priority(&self) -> ProcessPriority {
+        self.priority
+    }
+    
+    /// Met à jour le temps CPU virtuel (vruntime) pour le scheduler CFS
+    pub fn update_vruntime(&mut self, delta_time: u64) {
+        // Le vruntime augmente inversement proportionnel au poids
+        // Plus le poids est élevé (haute priorité), moins le vruntime augmente
+        let weight = self.priority.weight();
+        self.vruntime += (delta_time * 1024) / weight;
+        self.cpu_time += delta_time;
+    }
+    
+    /// Traite les signaux en attente pour ce processus
+    /// Retourne true si le processus doit être terminé
+    pub fn deliver_pending_signals(&mut self) -> bool {
+        signal::SignalManager::deliver_signals(self)
     }
     
     /// Duplique le processus (fork)
@@ -117,6 +220,11 @@ impl Process {
             kstack: None, // La pile noyau sera dupliquée
             address_space_id,
             cow_pages,
+            vruntime: self.vruntime,
+            cpu_time: 0, // Le processus enfant commence avec 0 temps CPU
+            last_scheduled: 0,
+            signal_queue: SignalQueue::new(), // Nouvelle queue pour l'enfant
+            signal_handlers: self.signal_handlers.clone(), // Hérite des handlers du parent
         };
         
         // TODO: Configurer le contexte pour le retour de fork
@@ -141,6 +249,21 @@ impl Process {
                 options(noreturn)
             );
         }
+    }
+    
+    /// Lance le processus en Ring 3
+    pub fn execute_in_ring3(&self) -> ! {
+        // Vérifier que le processus est configuré pour Ring 3
+        if self.context.privilege_level != 3 {
+            panic!("Process not configured for Ring 3 execution");
+        }
+        
+        // TODO: Charger la table des pages du processus
+        // TODO: Configurer les registres
+        // TODO: Basculer vers Ring 3
+        
+        // Pour l'instant, boucle infinie
+        loop {}
     }
 }
 
@@ -168,7 +291,7 @@ impl ProcessManager {
     }
     
     /// Crée un nouveau processus
-    pub fn create_process(&mut self, name: &str, entry_point: fn() -> !, priority: u8) -> Result<u64, &'static str> {
+    pub fn create_process(&mut self, name: &str, entry_point: fn() -> !, priority: ProcessPriority) -> Result<u64, &'static str> {
         let pid = self.next_pid;
         self.next_pid += 1;
         
@@ -180,7 +303,78 @@ impl ProcessManager {
         
         Ok(pid)
     }
-    
+
+    /// Charge et lance un exécutable depuis un fichier
+    pub fn spawn(&mut self, path: &str) -> Result<u64, String> {
+        let content = crate::fs::vfs_read_file(path)
+            .map_err(|_| String::from("File not found"))?;
+            
+        self.create_process_from_elf(path, &content)
+            .map_err(|e| String::from(e))
+    }
+
+    /// Crée un nouveau processus à partir de données ELF
+    pub fn create_process_from_elf(&mut self, name: &str, elf_data: &[u8]) -> Result<u64, &'static str> {
+        let elf = ElfFile::new(elf_data)?;
+        elf.header.validate()?;
+
+        // Créer l'espace d'adressage
+        let pid = self.next_pid;
+        self.next_pid += 1;
+        
+        // Logique de chargement simulée pour l'instant
+        // TODO: Implémenter l'allocation mémoire réelle avec VMManager
+        for ph in elf.program_headers() {
+            if ph.p_type == PT_LOAD {
+                // Segment à charger
+                let _vaddr = ph.p_vaddr;
+                let _memsz = ph.p_memsz;
+                let _filesz = ph.p_filesz;
+                let _flags = ph.p_flags;
+                
+                // Pour un vrai OS :
+                // 1. Allouer des frames physiques
+                // 2. Mapper vaddr -> frames dans le page table du process
+                // 3. Copier les données depuis elf.data[ph.p_offset..]
+                // 4. Zero-fill le reste (bss)
+            }
+        }
+        
+        let mut vm_manager = self.vm_manager.unwrap().lock();
+        if vm_manager.is_none() {
+            return Err("VMManager not initialized");
+        }
+        let vm = vm_manager.as_mut().unwrap();
+        let address_space_id = vm.create_process_space();
+        
+        let entry_point = elf.header.e_entry;
+        
+        // Création du Process struct
+        let mut process = Process {
+            pid,
+            name: String::from(name),
+            state: ProcessState::Ready,
+            context: ProcessContext::default(),
+            priority: ProcessPriority::Normal,
+            kstack: None,
+            address_space_id,
+            cow_pages: Vec::new(),
+            vruntime: 0,
+            cpu_time: 0,
+            last_scheduled: 0,
+            signal_queue: SignalQueue::new(),
+            signal_handlers: SignalHandlerTable::new(),
+        };
+        
+        process.context.rip = entry_point;
+        // Stack init would normally involve mapping stack pages to the end of user space
+
+        let process = Arc::new(Mutex::new(process));
+        self.processes.push(process);
+
+        Ok(pid)
+    }
+
     /// Duplique le processus actuel (fork)
     pub fn fork_process(&mut self) -> Result<u64, &'static str> {
         let current_pid = self.current_pid.ok_or("Aucun processus en cours d'exécution")?;
@@ -248,8 +442,34 @@ mod tests {
     #[test_case]
     fn test_process_creation() {
         let mut pm = ProcessManager::new();
-        let pid = pm.create_process("test", test_process, 1);
-        assert_eq!(pid, 1);
+        let pid = pm.create_process("test", test_process, ProcessPriority::Normal);
+        assert_eq!(pid, Ok(1));
         assert_eq!(pm.processes.len(), 1);
     }
+}
+
+// Instance globale du gestionnaire de processus
+use lazy_static::lazy_static;
+
+lazy_static! {
+    /// Gestionnaire de processus global
+    pub static ref PROCESS_MANAGER: Mutex<ProcessManager> = Mutex::new(ProcessManager::new());
+}
+
+/// Obtient le processus actuellement en cours d'exécution
+pub fn current_process() -> Option<Arc<Mutex<Process>>> {
+    let pm = PROCESS_MANAGER.lock();
+    let current_pid = pm.current_pid?;
+    pm.processes.iter()
+        .find(|p| p.lock().pid == current_pid)
+        .cloned()
+}
+
+/// Obtient un processus par son PID
+pub fn get_process_by_pid(pid: u64) -> Option<Arc<Mutex<Process>>> {
+    PROCESS_MANAGER.lock()
+        .processes
+        .iter()
+        .find(|p| p.lock().pid == pid)
+        .cloned()
 }

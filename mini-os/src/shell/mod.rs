@@ -126,35 +126,39 @@ impl Shell {
 
     /// Commande: cd <répertoire>
     fn builtin_cd(&mut self, cmd: &Command) -> Result<(), ShellError> {
-        if cmd.args.is_empty() {
-            self.current_dir = self.env_vars.get("HOME")
+        let new_dir = if cmd.args.is_empty() {
+            self.env_vars.get("HOME")
                 .cloned()
-                .unwrap_or_else(|| "/".into());
-            Ok(())
+                .unwrap_or_else(|| "/".into())
         } else {
             let path = &cmd.args[0];
             if path == ".." {
-                if self.current_dir != "/" {
-                    if let Some(pos) = self.current_dir.rfind('/') {
-                        if pos == 0 {
-                            self.current_dir = "/".into();
-                        } else {
-                            self.current_dir = self.current_dir[..pos].into();
-                        }
-                    }
+                if self.current_dir == "/" {
+                    "/".into()
+                } else {
+                    let pos = self.current_dir.rfind('/').unwrap_or(0);
+                    if pos == 0 { "/".into() } else { self.current_dir[..pos].into() }
                 }
             } else if path == "/" {
-                self.current_dir = "/".into();
+                "/".into()
             } else if path.starts_with('/') {
-                self.current_dir = path.into();
+                path.into()
             } else {
                 if self.current_dir == "/" {
-                    self.current_dir = format!("/{}", path);
+                    format!("/{}", path)
                 } else {
-                    self.current_dir = format!("{}/{}", self.current_dir, path);
+                    format!("{}/{}", self.current_dir, path)
                 }
             }
+        };
+
+        // Check if directory exists
+        if mini_os::fs::is_dir(&new_dir) {
+            self.current_dir = new_dir;
             Ok(())
+        } else {
+            WRITER.lock().write_string(&format!("cd: {}: Aucun dossier de ce type\n", new_dir));
+            Err(ShellError::ExecutionFailed("Directory not found".into()))
         }
     }
 
@@ -166,26 +170,73 @@ impl Shell {
 
     /// Commande: ls [répertoire]
     fn builtin_ls(&self, cmd: &Command) -> Result<(), ShellError> {
-        let dir = if cmd.args.is_empty() {
+        let target_dir = if cmd.args.is_empty() {
             self.current_dir.clone()
         } else {
-            cmd.args[0].clone()
+            // Handle relative paths for ls arguments (simplified)
+            let arg = &cmd.args[0];
+            if arg.starts_with('/') {
+                arg.clone()
+            } else {
+                 if self.current_dir == "/" {
+                    format!("/{}", arg)
+                } else {
+                    format!("{}/{}", self.current_dir, arg)
+                }
+            }
         };
 
-        WRITER.lock().write_string(&format!("Contenu de {}:\n", dir));
-        WRITER.lock().write_string("  .\n");
-        WRITER.lock().write_string("  ..\n");
-        WRITER.lock().write_string("  file1.txt\n");
-        WRITER.lock().write_string("  file2.txt\n");
-        
-        Ok(())
+        match mini_os::fs::vfs_ls(&target_dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    WRITER.lock().write_string(&format!("  {}\n", entry));
+                }
+                Ok(())
+            }
+            Err(_) => {
+                WRITER.lock().write_string(&format!("ls: impossible d'accéder à '{}': Aucun fichier ou dossier de ce type\n", target_dir));
+                Err(ShellError::ExecutionFailed("ls failed".into()))
+            }
+        }
     }
 
-    /// Commande: echo <texte>
+    /// Commande: echo <texte> [> <fichier>]
     fn builtin_echo(&self, cmd: &Command) -> Result<(), ShellError> {
-        let text = cmd.args.join(" ");
-        WRITER.lock().write_string(&format!("{}\n", text));
-        Ok(())
+        let args = &cmd.args;
+        
+        // Check for redirection
+        if let Some(pos) = args.iter().position(|r| r == ">") {
+             if pos + 1 >= args.len() {
+                 WRITER.lock().write_string("echo: erreur de syntaxe redirection\n");
+                 return Err(ShellError::InvalidArguments);
+             }
+             
+             let content_args = &args[..pos];
+             let filename = &args[pos+1];
+             let text = content_args.join(" ");
+             
+             let full_path = if filename.starts_with('/') {
+                filename.clone()
+            } else {
+                 if self.current_dir == "/" {
+                    format!("/{}", filename)
+                } else {
+                    format!("{}/{}", self.current_dir, filename)
+                }
+            };
+            
+            match mini_os::fs::vfs_write_file(&full_path, text.as_bytes()) {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    WRITER.lock().write_string(&format!("echo: erreur d'écriture: {:?}\n", e));
+                    Err(ShellError::ExecutionFailed("write failed".into()))
+                }
+            }
+        } else {
+            let text = args.join(" ");
+            WRITER.lock().write_string(&format!("{}\n", text));
+            Ok(())
+        }
     }
 
     /// Commande: cat <fichier>
@@ -195,10 +246,34 @@ impl Shell {
         }
 
         let filename = &cmd.args[0];
-        WRITER.lock().write_string(&format!("Contenu de {}:\n", filename));
-        WRITER.lock().write_string("(Contenu du fichier)\n");
-        
-        Ok(())
+        let full_path = if filename.starts_with('/') {
+            filename.clone()
+        } else {
+             if self.current_dir == "/" {
+                format!("/{}", filename)
+            } else {
+                format!("{}/{}", self.current_dir, filename)
+            }
+        };
+
+        match mini_os::fs::vfs_read_file(&full_path) {
+            Ok(content) => {
+                // Convert bytes to string (lossy)
+                let text = String::from_utf8_lossy(&content);
+                WRITER.lock().write_string(&text);
+                // Print newline if content doesn't end with one? Or just strictly print content?
+                // Cat usually prints raw content. But our Writer might need newline for flush?
+                // Let's print newline for better readability in this mini-shell.
+                if !text.ends_with('\n') {
+                    WRITER.lock().write_string("\n");
+                }
+                Ok(())
+            }
+            Err(_) => {
+                WRITER.lock().write_string(&format!("cat: {}: Aucun fichier de ce type\n", filename));
+                Err(ShellError::ExecutionFailed("cat failed".into()))
+            }
+        }
     }
 
     /// Commande: mkdir <répertoire>
@@ -208,9 +283,23 @@ impl Shell {
         }
 
         let dirname = &cmd.args[0];
-        WRITER.lock().write_string(&format!("Création du répertoire: {}\n", dirname));
-        
-        Ok(())
+        let full_path = if dirname.starts_with('/') {
+            dirname.clone()
+        } else {
+             if self.current_dir == "/" {
+                format!("/{}", dirname)
+            } else {
+                format!("{}/{}", self.current_dir, dirname)
+            }
+        };
+
+        match mini_os::fs::vfs_mkdir(&full_path) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                WRITER.lock().write_string(&format!("mkdir: impossible de créer le dossier '{}': {:?}\n", dirname, e));
+                Err(ShellError::ExecutionFailed("mkdir failed".into()))
+            }
+        }
     }
 
     /// Commande: rm <fichier>
@@ -220,9 +309,23 @@ impl Shell {
         }
 
         let filename = &cmd.args[0];
-        WRITER.lock().write_string(&format!("Suppression de: {}\n", filename));
+        let full_path = if filename.starts_with('/') {
+            filename.clone()
+        } else {
+             if self.current_dir == "/" {
+                format!("/{}", filename)
+            } else {
+                format!("{}/{}", self.current_dir, filename)
+            }
+        };
         
-        Ok(())
+        match mini_os::fs::vfs_remove_file(&full_path) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                 WRITER.lock().write_string(&format!("rm: impossible de supprimer '{}': {:?}\n", filename, e));
+                 Err(ShellError::ExecutionFailed("rm failed".into()))
+            }
+        }
     }
 
     /// Commande: cp <source> <destination>

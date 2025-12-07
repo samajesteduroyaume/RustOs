@@ -1,4 +1,4 @@
-# 📚 Documentation RustOS v1.0.0
+# 📚 Documentation RustOS v1.2.0
 
 Bienvenue dans la documentation complète de RustOS. Ce répertoire contient tous les guides, références API, et documentation architecturale du projet.
 
@@ -9,6 +9,7 @@ Guides pratiques pour utiliser et développer avec RustOS :
 - **shell-guide.md** - Guide complet du shell
 - **network-guide.md** - Guide de la pile réseau
 - **driver-guide.md** - Guide des drivers
+- **ring3-guide.md** - Guide du mode utilisateur (Ring 3)
 
 ### [api/](api/) - Documentation API
 Références complètes des APIs disponibles :
@@ -16,12 +17,14 @@ Références complètes des APIs disponibles :
 - **libc-api.md** - API Librairie Standard
 - **network-api.md** - API Réseau
 - **driver-api.md** - API Drivers
+- **syscall-api.md** - API des appels système
 
 ### [architecture/](architecture/) - Architecture Système
 Documentation de l'architecture interne :
 - **overview.md** - Vue d'ensemble du système
 - **kernel.md** - Architecture du noyau
 - **memory.md** - Gestion de la mémoire
+- **ring3-architecture.md** - Architecture du mode utilisateur (Ring 3)
 - **networking.md** - Architecture réseau
 
 ### [proposals/](proposals/) - Propositions et Planification

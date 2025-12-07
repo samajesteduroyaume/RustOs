@@ -1,7 +1,7 @@
 use spin::Mutex;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
-use crate::process::Process;
+use mini_os::process::Process;
 
 /// Sémaphore pour la synchronisation entre processus
 pub struct Semaphore {

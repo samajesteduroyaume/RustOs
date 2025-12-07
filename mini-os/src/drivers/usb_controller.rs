@@ -2,8 +2,10 @@
 /// 
 /// Supporte UHCI, OHCI, EHCI, et XHCI
 
+extern crate alloc;
 use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::format;
 use crate::vga_buffer::WRITER;
 
 /// Types de contrôleurs USB

@@ -10,7 +10,7 @@ cargo build --release
 mkdir -p isodir/boot/grub
 
 # Copier le noyau et la configuration GRUB
-cp target/x86_64-blog_os/release/mini-os isodir/boot/kernel.elf
+cp target/x86_64-unknown-none/release/mini-os isodir/boot/kernel.elf
 cp grub.cfg isodir/boot/grub/
 
 # Créer l'ISO bootable

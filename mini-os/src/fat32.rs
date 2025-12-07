@@ -3,9 +3,10 @@ use core::mem::size_of;
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::vec;
+use alloc::format;
 use spin::Mutex;
-use crate::filesystem::{FsError, NodeType, Metadata};
-use crate::disk::Disk;
+use crate::fs::{VfsError as FsError}; // Alias VfsError to FsError to match usage
+use crate::drivers::disk::Disk; // Use correct path for Disk trait
 use core::convert::TryInto;
 
 // Constantes pour FAT32
@@ -34,7 +35,6 @@ const CLUSTER_ROOT: u32 = 2;  // Premier cluster utilisable (0 et 1 sont réserv
 
 // Constantes pour FAT32
 const SECTORS_PER_CLUSTER: u32 = 8;
-const SECTORS_PER_CLUSTER: u32 = 8; // Valeur typique, à ajuster selon le formatage
 const RESERVED_SECTORS: u32 = 32;   // Secteurs réservés (typique pour FAT32)
 const NUM_FATS: u8 = 2;             // Nombre de copies de la FAT
 const ROOT_ENTRIES: u16 = 0;        // 0 pour FAT32 (le répertoire racine est un cluster)
@@ -46,8 +46,8 @@ const NUM_HEADS: u16 = 255;         // Valeur typique
 const HIDDEN_SECTORS: u32 = 0;      // Ajuster selon la partition
 const TOTAL_SECTORS_32: u32 = 0;    // À déterminer
 
-// Boot Parameter Block (BPB) pour FAT32
 #[repr(C, packed)]
+#[derive(Clone, Copy)]
 pub struct BiosParameterBlock {
     pub jmp_boot: [u8; 3],          // Code de démarrage
     pub oem_name: [u8; 8],          // Nom du formatage
@@ -84,6 +84,7 @@ pub struct BiosParameterBlock {
 
 // Entrée de répertoire FAT32
 #[repr(C, packed)]
+#[derive(Clone, Copy)]
 pub struct DirEntry {
     pub name: [u8; 8],              // Nom du fichier (8 caractères)
     pub ext: [u8; 3],               // Extension (3 caractères)
@@ -102,6 +103,7 @@ pub struct DirEntry {
 
 // Structure pour gérer une entrée de répertoire longue (LFN)
 #[repr(C, packed)]
+#[derive(Clone, Copy)]
 pub struct LfnEntry {
     pub order: u8,                   // Numéro d'ordre
     pub name1: [u16; 5],            // Première partie du nom (caractères 1-5)
@@ -127,7 +129,7 @@ pub struct FAT32<D: Disk> {
 
 impl<D: Disk> FAT32<D> {
     /// Crée une nouvelle instance de FAT32
-    pub fn new(disk_offset: u64) -> Result<Self, FsError> {
+    pub fn new(mut disk: D, disk_offset: u64) -> Result<Self, FsError> {
         // Lire le secteur de démarrage (secteur 0)
         let mut bpb = BiosParameterBlock {
             jmp_boot: [0; 3],
@@ -161,17 +163,25 @@ impl<D: Disk> FAT32<D> {
             boot_signature: 0,
         };
 
-        // TODO: Lire le secteur de démarrage depuis le disque
-        // disk_read(disk_offset, &mut bpb as *const _ as *mut u8, 512);
+        // Lire le secteur de démarrage depuis le disque
+        // disk_read(disk_offset, &mut bpb as *const _ as *mut u8, 512); -- COMMENTAIRE ORIGINAL, ON REMPLACE PAR:
+        
+        // Lecture réelle du BPB
+        unsafe {
+            // Hack pour lire structure packed dans buffer
+            let mut buffer = [0u8; 512];
+            disk.read(disk_offset, &mut buffer).map_err(|_| FsError::IoError)?;
+            core::ptr::copy_nonoverlapping(buffer.as_ptr(), &mut bpb as *mut _ as *mut u8, 512);
+        }
 
         // Vérifier la signature de démarrage
         if bpb.boot_signature != 0xAA55 {
-            return Err(FsError::IOError);
+            return Err(FsError::IoError);
         }
 
         // Vérifier que c'est bien un système de fichiers FAT32
         if &bpb.fs_type[0..4] != b"FAT32" {
-            return Err(FsError::IOError);
+            return Err(FsError::IoError);
         }
 
         // Calculer les positions importantes
@@ -180,10 +190,14 @@ impl<D: Disk> FAT32<D> {
         let data_start = fat_start + (bpb.sectors_per_fat_32 as u64 * bpb.num_fats as u64 * 512) + (root_dir_sectors as u64 * 512);
 
         Ok(FAT32 {
+            disk, // Initialisation du champ disk
             bpb,
             fat_start,
             data_start,
             current_dir_cluster: bpb.root_cluster,
+            next_free_cluster: bpb.root_cluster + 1, // Valeur initiale simple
+            free_cluster_count: 0, // À calculer
+            initialized: true,
         })
     }
 
@@ -205,7 +219,7 @@ impl<D: Disk> FAT32<D> {
             let sector_addr = sector + i as u64;
             
             if let Err(_) = self.disk.read(sector_addr, &mut buffer[offset..offset + bytes_per_sector]) {
-                return Err(FsError::IOError);
+                return Err(FsError::IoError);
             }
         }
         
@@ -215,7 +229,7 @@ impl<D: Disk> FAT32<D> {
     /// Écrit un cluster sur le disque
     fn write_cluster(&mut self, cluster: u32, data: &[u8]) -> Result<(), FsError> {
         if cluster < 2 || cluster >= 0x0FFFFFF0 {
-            return Err(FsError::InvalidInput);
+            return Err(FsError::InvalidArgument);
         }
 
         let sector = self.data_start + 
@@ -230,7 +244,7 @@ impl<D: Disk> FAT32<D> {
             let sector_addr = sector + i as u64;
             
             if let Err(_) = self.disk.write(sector_addr, &data[offset..offset + bytes_per_sector]) {
-                return Err(FsError::IOError);
+                return Err(FsError::IoError);
             }
         }
         
@@ -246,7 +260,7 @@ impl<D: Disk> FAT32<D> {
         // Lire le secteur FAT
         let mut sector = vec![0u8; self.bpb.bytes_per_sector as usize];
         if let Err(_) = self.disk.read(fat_sector, &mut sector) {
-            return Err(FsError::IOError);
+            return Err(FsError::IoError);
         }
         
         // Extraire la valeur du cluster
@@ -269,7 +283,7 @@ impl<D: Disk> FAT32<D> {
         // Lire le secteur FAT existant
         let mut sector = vec![0u8; self.bpb.bytes_per_sector as usize];
         if let Err(_) = self.disk.read(fat_sector, &mut sector) {
-            return Err(FsError::IOError);
+            return Err(FsError::IoError);
         }
         
         // Mettre à jour la valeur du cluster
@@ -280,7 +294,7 @@ impl<D: Disk> FAT32<D> {
         
         // Écrire le secteur FAT mis à jour
         if let Err(_) = self.disk.write(fat_sector, &sector) {
-            return Err(FsError::IOError);
+            return Err(FsError::IoError);
         }
         
         // Mettre à jour la copie de la FAT si nécessaire
@@ -289,7 +303,7 @@ impl<D: Disk> FAT32<D> {
             for i in 1..self.bpb.num_fats as u64 {
                 let backup_fat_sector = fat_sector + (i * fat_size);
                 if let Err(_) = self.disk.write(backup_fat_sector, &sector) {
-                    return Err(FsError::IOError);
+                    return Err(FsError::IoError);
                 }
             }
         }
@@ -308,7 +322,7 @@ impl<D: Disk> FAT32<D> {
         
         // Vérifier si le cluster est valide
         if next_cluster == FAT32_FREE || next_cluster == FAT32_BAD || next_cluster == 1 {
-            return Err(FsError::IOError);
+            return Err(FsError::IoError);
         }
 
         Ok(next_cluster)
@@ -352,7 +366,7 @@ impl<D: Disk> FAT32<D> {
     /// Alloue une nouvelle chaîne de clusters
     fn allocate_cluster_chain(&mut self, count: u32) -> Result<u32, FsError> {
         if count == 0 {
-            return Err(FsError::InvalidInput);
+            return Err(FsError::InvalidArgument);
         }
         
         // Trouver le premier cluster libre
@@ -497,14 +511,14 @@ impl<D: Disk> FAT32<D> {
             self.read_cluster(current_cluster, &mut buffer)?;
             
             // Déterminer la quantité de données à copier
-            let to_copy = std::cmp::min(remaining_size, cluster_size) as usize;
+            let to_copy = core::cmp::min(remaining_size, cluster_size) as usize;
             data.extend_from_slice(&buffer[..to_copy]);
             remaining_size -= to_copy as u64;
             
             // Passer au cluster suivant
             match self.get_next_cluster(current_cluster) {
                 Ok(next_cluster) => current_cluster = next_cluster,
-                Err(_) if remaining_size > 0 => return Err(FsError::IOError),
+                Err(_) if remaining_size > 0 => return Err(FsError::IoError),
                 Err(_) => break,
             }
         }
@@ -559,7 +573,7 @@ impl<D: Disk> FAT32<D> {
         
         while !remaining_data.is_empty() {
             // Déterminer la taille des données à écrire dans ce cluster
-            let chunk_size = std::cmp::min(remaining_data.len(), cluster_size);
+            let chunk_size = core::cmp::min(remaining_data.len(), cluster_size);
             let chunk = &remaining_data[..chunk_size];
             
             // Préparer le buffer avec les données
@@ -707,106 +721,8 @@ impl<D: Disk> FAT32<D> {
         
         Err(FsError::NotFound)
     }
-            
-            // Parcourir les entrées du répertoire
-            for entry_chunk in buffer.chunks(32) {
-                if entry_chunk[0] == 0x00 {
-                    // Fin du répertoire
-                    return Err(FsError::NotFound);
-                }
-                
-                // Ignorer les entrées supprimées ou longues
-                if entry_chunk[0] == 0xE5 || (entry_chunk[11] & 0x0F) == 0x0F {
-                    continue;
-                }
-                
-                // Convertir l'entrée en structure DirEntry
-                let entry: DirEntry = unsafe { core::ptr::read(entry_chunk.as_ptr() as *const _) };
-                
-                // Vérifier si c'est le fichier recherché
-                let mut entry_name = String::new();
-                for &c in &entry.name {
-                    if c != b' ' {
-                        entry_name.push(c as char);
-                    } else {
-                        break;
-                    }
-                }
-                
-                if !entry_name.is_empty() && (entry.attr & 0x10) == 0 { // Pas un répertoire
-                    if let Some(ext) = std::str::from_utf8(&entry.ext).ok() {
-                        let ext = ext.trim_end_matches(' ');
-                        if !ext.is_empty() {
-                            entry_name.push('.');
-                            entry_name.push_str(ext);
-                        }
-                    }
-                    
-                    if entry_name.eq_ignore_ascii_case(name) {
-                        return Ok(entry);
-                    }
-                }
-            }
-            
-            // Passer au cluster suivant
-            match self.get_next_cluster(current_cluster) {
-                Ok(next) => current_cluster = next,
-                Err(_) => break,
-            }
-        }
-        
-        Err(FsError::NotFound)
-    }
-    
+
     /// Lit un fichier dans le système de fichiers
-    pub fn read_file(&self, path: &str) -> Result<Vec<u8>, FsError> {
-        // Pour l'instant, on ne gère que les chemins simples dans le répertoire courant
-        let entry = self.find_file(path)?;
-        let file_size = entry.file_size as usize;
-        let mut data = Vec::with_capacity(file_size);
-        
-        // Obtenir le premier cluster
-        let first_cluster = ((entry.first_cluster_hi as u32) << 16) | (entry.first_cluster_lo as u32);
-        let mut current_cluster = first_cluster;
-        let mut bytes_read = 0;
-        
-        // Taille d'un cluster en octets
-        let cluster_size = self.bpb.bytes_per_sector as usize * self.bpb.sectors_per_cluster as usize;
-        let mut buffer = vec![0u8; cluster_size];
-        
-        // Lire les clusters successifs
-        loop {
-            self.read_cluster(current_cluster, &mut buffer)?;
-            
-            // Déterminer combien d'octets lire dans ce cluster
-            let remaining = file_size - bytes_read;
-            let to_read = if remaining > cluster_size {
-                cluster_size
-            } else {
-                remaining
-            };
-            
-            // Ajouter les données au résultat
-            data.extend_from_slice(&buffer[..to_read]);
-            bytes_read += to_read;
-            
-            if bytes_read >= file_size {
-                break;
-            }
-            
-            // Passer au cluster suivant
-            match self.get_next_cluster(current_cluster) {
-                Ok(next) => current_cluster = next,
-                Err(_) => break,
-            }
-        }
-        
-        if bytes_read < file_size {
-            return Err(FsError::IOError);
-        }
-        
-        Ok(data)
-    }
     
     /// Convertit un nom de fichier en format 8.3
     fn to_short_name(name: &str) -> String {
@@ -820,18 +736,18 @@ impl<D: Disk> FAT32<D> {
         let name_part = if name_part.len() > 8 { &name_part[..8] } else { name_part };
         let ext_part = if ext_part.len() > 3 { &ext_part[..3] } else { ext_part };
         
-        format!("{:8.8}{:3.3}", name_part, ext_part)
+        alloc::format!("{:8.8}{:3.3}", name_part, ext_part)
     }
     
     /// Formate un nom de fichier 8.3
     fn format_short_name(name: &[u8; 8], ext: &[u8; 3]) -> String {
         let name_str = String::from_utf8_lossy(name).trim_end().into();
-        let ext_str = String::from_utf8_lossy(ext).trim_end().into();
+        let ext_str: String = String::from_utf8_lossy(ext).trim_end().into();
         
         if ext_str.is_empty() {
             name_str
         } else {
-            format!("{}.{}", name_str, ext_str)
+            alloc::format!("{}.{}", name_str, ext_str)
         }
     }
     
@@ -860,7 +776,7 @@ impl<D: Disk> FAT32<D> {
         // Concaténer les parties du nom
         for entry in sorted_entries {
             // Ajouter les caractères de chaque partie du nom
-            for &c in &entry.name1 {
+            for c in entry.name1 {
                 if c != 0xFFFF && c != 0x0000 {
                     if let Some(ch) = char::from_u32(c as u32) {
                         result.push(ch);
@@ -868,7 +784,7 @@ impl<D: Disk> FAT32<D> {
                 }
             }
             
-            for &c in &entry.name2 {
+            for c in entry.name2 {
                 if c != 0xFFFF && c != 0x0000 {
                     if let Some(ch) = char::from_u32(c as u32) {
                         result.push(ch);
@@ -876,7 +792,7 @@ impl<D: Disk> FAT32<D> {
                 }
             }
             
-            for &c in &entry.name3 {
+            for c in entry.name3 {
                 if c != 0xFFFF && c != 0x0000 {
                     if let Some(ch) = char::from_u32(c as u32) {
                         result.push(ch);
@@ -887,46 +803,44 @@ impl<D: Disk> FAT32<D> {
         
         result
     }
-}
 
-// Implémentation du trait FileSystem pour FAT32
-impl<D: Disk> crate::filesystem::FileSystem for FAT32<D> {
-    fn read_dir(&self, path: &str) -> Result<Vec<String>, FsError> {
+    /// Lit les entrées racine ou d'un répertoire
+    pub fn read_dir(&self, path: &str) -> Result<Vec<String>, FsError> {
         let mut entries = Vec::new();
         let mut current_cluster = if path.is_empty() || path == "/" {
             self.bpb.root_cluster
         } else {
+            // Trouver le cluster du répertoire
             let entry = self.find_file(path)?;
             if (entry.attr & ATTR_DIRECTORY) == 0 {
-                return Err(FsError::NotADirectory);
+                return Err(FsError::NotDirectory);
             }
             ((entry.first_cluster_hi as u32) << 16) | (entry.first_cluster_lo as u32)
         };
         
-        let mut buffer = vec![0u8; self.bpb.bytes_per_sector as usize * self.bpb.sectors_per_cluster as usize];
-        let mut lfn_entries = Vec::new();
-        
         loop {
-            // Lire le cluster actuel
+            // Taille d'un cluster en octets
+            let cluster_size = self.bpb.bytes_per_sector as usize * self.bpb.sectors_per_cluster as usize;
+            let mut buffer = vec![0u8; cluster_size];
+            
+            // Lire le contenu du cluster
             self.read_cluster(current_cluster, &mut buffer)?;
             
-            // Parcourir chaque entrée de répertoire dans le cluster
-            for entry_pos in (0..buffer.len()).step_by(DIR_ENTRY_SIZE) {
-                let entry_slice = &buffer[entry_pos..entry_pos + DIR_ENTRY_SIZE];
-                let first_byte = entry_slice[0];
-                
-                // Vérifier si c'est la fin du répertoire
-                if first_byte == DIR_ENTRY_LAST {
+            // Parser les entrées
+            let mut lfn_entries: Vec<LfnEntry> = Vec::new();
+            
+            for entry_slice in buffer.chunks(DIR_ENTRY_SIZE) {
+                if entry_slice[0] == 0x00 {
+                    // Fin du répertoire
                     return Ok(entries);
                 }
                 
-                // Ignorer les entrées supprimées
-                if first_byte == DIR_ENTRY_DELETED {
-                    lfn_entries.clear();
+                if entry_slice[0] == 0xE5 {
+                    // Entrée supprimée
                     continue;
                 }
                 
-                // Vérifier si c'est une entrée LFN (Long File Name)
+                // Vérifier si c'est une entrée LFN
                 if (entry_slice[11] & ATTR_LONG_NAME) == ATTR_LONG_NAME {
                     // C'est une entrée LFN, la stocker pour plus tard
                     let lfn_entry = unsafe { &*(entry_slice.as_ptr() as *const LfnEntry) };
@@ -966,184 +880,5 @@ impl<D: Disk> crate::filesystem::FileSystem for FAT32<D> {
         }
         
         Ok(entries)
-    }
-    
-    fn read_file(&self, path: &str) -> Result<Vec<u8>, FsError> {
-        self.read_file(path)
-    }
-    
-    fn write_file(&mut self, path: &str, content: &[u8]) -> Result<(), FsError> {
-        self.write_file(path, content)
-    }
-    
-    fn create_file(&mut self, path: &str, content: &[u8]) -> Result<(), FsError> {
-        // Vérifier si le fichier existe déjà
-        if self.find_file(path).is_ok() {
-            return Err(FsError::AlreadyExists);
-        }
-        
-        // Créer le fichier avec le contenu fourni
-        self.write_file(path, content)
-    }
-    
-    fn create_dir(&mut self, path: &str) -> Result<(), FsError> {
-        // Vérifier si le répertoire existe déjà
-        if self.find_file(path).is_ok() {
-            return Err(FsError::AlreadyExists);
-        }
-        
-        // Séparer le nom du répertoire parent et le nom du nouveau répertoire
-        let (parent_path, dir_name) = match path.rfind('/') {
-            Some(pos) => (Some(&path[..pos]), &path[pos + 1..]),
-            None => (None, path),
-        };
-        
-        // Allouer un nouveau cluster pour le répertoire
-        let new_cluster = self.allocate_cluster_chain(1)?;
-        
-        // Initialiser le cluster avec des entrées . et ..
-        let cluster_size = self.bpb.bytes_per_sector as usize * self.bpb.sectors_per_cluster as usize;
-        let mut dir_data = vec![0u8; cluster_size];
-        
-        // Créer l'entrée . (répertoire courant)
-        let dot_entry = DirEntry {
-            name: *b".       ",
-            ext: *b"   ",
-            attr: ATTR_DIRECTORY,
-            nt_reserved: 0,
-            creation_time_tenth: 0,
-            creation_time: 0,
-            creation_date: 0,
-            last_access_date: 0,
-            first_cluster_hi: (new_cluster >> 16) as u16,
-            write_time: 0,
-            write_date: 0,
-            first_cluster_lo: (new_cluster & 0xFFFF) as u16,
-            file_size: 0,
-        };
-        
-        // Créer l'entrée .. (répertoire parent)
-        let parent_cluster = parent_path.map_or(self.bpb.root_cluster, |p| {
-            self.find_file(p).ok()
-                .map(|e| ((e.first_cluster_hi as u32) << 16) | (e.first_cluster_lo as u32))
-                .unwrap_or(self.bpb.root_cluster)
-        });
-        
-        let dotdot_entry = DirEntry {
-            name: *b"..      ",
-            ext: *b"   ",
-            attr: ATTR_DIRECTORY,
-            nt_reserved: 0,
-            creation_time_tenth: 0,
-            creation_time: 0,
-            creation_date: 0,
-            last_access_date: 0,
-            first_cluster_hi: (parent_cluster >> 16) as u16,
-            write_time: 0,
-            write_date: 0,
-            first_cluster_lo: (parent_cluster & 0xFFFF) as u16,
-            file_size: 0,
-        };
-        
-        // Copier les entrées dans le buffer
-        let dot_slice = unsafe {
-            core::slice::from_raw_parts(
-                &dot_entry as *const _ as *const u8,
-                core::mem::size_of::<DirEntry>()
-            )
-        };
-        
-        let dotdot_slice = unsafe {
-            core::slice::from_raw_parts(
-                &dotdot_entry as *const _ as *const u8,
-                core::mem::size_of::<DirEntry>()
-            )
-        };
-        
-        dir_data[..DIR_ENTRY_SIZE].copy_from_slice(dot_slice);
-        dir_data[DIR_ENTRY_SIZE..2 * DIR_ENTRY_SIZE].copy_from_slice(dotdot_slice);
-        
-        // Écrire les données du répertoire
-        self.write_cluster(new_cluster, &dir_data)?;
-        
-        // Créer l'entrée de répertoire dans le parent
-        let dir_entry = DirEntry {
-            name: [b' '; 8],
-            ext: [b' '; 3],
-            attr: ATTR_DIRECTORY,
-            nt_reserved: 0,
-            creation_time_tenth: 0,
-            creation_time: 0,
-            creation_date: 0,
-            last_access_date: 0,
-            first_cluster_hi: (new_cluster >> 16) as u16,
-            write_time: 0,
-            write_date: 0,
-            first_cluster_lo: (new_cluster & 0xFFFF) as u16,
-            file_size: 0,
-        };
-        
-        // Définir le nom du répertoire
-        let (name, _) = Self::split_filename(dir_name);
-        let mut dir_entry = dir_entry;
-        dir_entry.name[..name.len().min(8)].copy_from_slice(&name.as_bytes()[..name.len().min(8)]);
-        
-        // Ajouter l'entrée au répertoire parent
-        if let Some(parent_path) = parent_path {
-            // Changer temporairement le répertoire courant
-            let old_dir = self.current_dir_cluster;
-            self.current_dir_cluster = self.find_file(parent_path)
-                .map(|e| ((e.first_cluster_hi as u32) << 16) | (e.first_cluster_lo as u32))?;
-            
-            let result = self.add_directory_entry(&dir_entry);
-            
-            // Restaurer le répertoire courant
-            self.current_dir_cluster = old_dir;
-            result
-        } else {
-            // Ajouter au répertoire racine
-            self.add_directory_entry(&dir_entry)
-        }
-    }
-    
-    fn remove_file(&mut self, path: &str) -> Result<(), FsError> {
-        self.remove_file(path)
-    }
-    
-    fn remove_dir(&mut self, path: &str) -> Result<(), FsError> {
-        // Vérifier que c'est bien un répertoire
-        let entry = self.find_file(path)?;
-        if (entry.attr & ATTR_DIRECTORY) == 0 {
-            return Err(FsError::NotADirectory);
-        }
-        
-        // Vérifier que le répertoire est vide
-        let dir_entries = self.read_dir(path)?;
-        if !dir_entries.is_empty() {
-            return Err(FsError::DirectoryNotEmpty);
-        }
-        
-        // Libérer les clusters alloués
-        let first_cluster = ((entry.first_cluster_hi as u32) << 16) | (entry.first_cluster_lo as u32);
-        self.free_cluster_chain(first_cluster)?;
-        
-        // Marquer l'entrée comme supprimée
-        self.mark_entry_deleted(path)
-    }
-    
-    fn exists(&self, path: &str) -> bool {
-        self.find_file(path).is_ok()
-    }
-    
-    fn is_file(&self, path: &str) -> bool {
-        self.find_file(path)
-            .map(|e| (e.attr & ATTR_DIRECTORY) == 0)
-            .unwrap_or(false)
-    }
-    
-    fn is_dir(&self, path: &str) -> bool {
-        self.find_file(path)
-            .map(|e| (e.attr & ATTR_DIRECTORY) != 0)
-            .unwrap_or(false)
     }
 }

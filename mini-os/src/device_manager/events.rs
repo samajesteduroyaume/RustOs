@@ -115,14 +115,14 @@ pub fn register_device_event(
 mod tests {
     use super::*;
     
-    #[test]
+    #[test_case]
     fn test_event_manager_creation() {
         let manager = EventManager::new(10);
         assert_eq!(manager.pending_events(), 0);
         assert_eq!(manager.processed_events(), 0);
     }
     
-    #[test]
+    #[test_case]
     fn test_push_pop_event() {
         let mut manager = EventManager::new(10);
         let event = DeviceEvent {
@@ -141,7 +141,7 @@ mod tests {
         assert_eq!(manager.processed_events(), 1);
     }
     
-    #[test]
+    #[test_case]
     fn test_event_queue_full() {
         let mut manager = EventManager::new(2);
         let event = DeviceEvent {

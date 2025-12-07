@@ -354,13 +354,17 @@ mod tests {
     #[test_case]
     fn test_l2cap_header() {
         let header = L2capHeader::new(100, 0x0040);
-        assert_eq!(header.length, 100);
-        assert_eq!(header.channel_id, 0x0040);
+        let length = header.length;
+        let channel_id = header.channel_id;
+        assert_eq!(length, 100);
+        assert_eq!(channel_id, 0x0040);
 
         let bytes = header.as_bytes();
         let parsed = L2capHeader::from_bytes(&bytes).unwrap();
-        assert_eq!(parsed.length, 100);
-        assert_eq!(parsed.channel_id, 0x0040);
+        let parsed_length = parsed.length;
+        let parsed_channel_id = parsed.channel_id;
+        assert_eq!(parsed_length, 100);
+        assert_eq!(parsed_channel_id, 0x0040);
     }
 
     #[test_case]

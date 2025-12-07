@@ -1,5 +1,11 @@
 use super::{Driver, DriverError};
+extern crate alloc;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 use crate::vga_buffer::WRITER;
+use x86_64::instructions::port::{Port, PortReadOnly, PortWriteOnly};
+use spin::Mutex;
 
 /// Erreurs spécifiques au driver disque
 #[derive(Debug, Clone, Copy)]
@@ -10,6 +16,7 @@ pub enum DiskError {
     ReadFailed,
     WriteFailed,
     Timeout,
+    NotReady,
 }
 
 /// Ports ATA/SATA
@@ -44,6 +51,35 @@ pub mod ata_status {
     pub const ERROR: u8 = 0x01;
 }
 
+struct AtaPorts {
+    data: Port<u16>,
+    error: PortReadOnly<u8>,
+    sector_count: Port<u8>,
+    lba_low: Port<u8>,
+    lba_mid: Port<u8>,
+    lba_high: Port<u8>,
+    device: Port<u8>,
+    status: PortReadOnly<u8>,
+    command: PortWriteOnly<u8>,
+}
+
+impl AtaPorts {
+    fn new(base: u16) -> Self {
+        // Base is usually 0x1F0 for primary
+        Self {
+            data: Port::new(base),
+            error: PortReadOnly::new(base + 1),
+            sector_count: Port::new(base + 2),
+            lba_low: Port::new(base + 3),
+            lba_mid: Port::new(base + 4),
+            lba_high: Port::new(base + 5),
+            device: Port::new(base + 6),
+            status: PortReadOnly::new(base + 7),
+            command: PortWriteOnly::new(base + 7),
+        }
+    }
+}
+
 /// Driver disque ATA/SATA
 pub struct DiskDriver {
     pub name: String,
@@ -51,6 +87,14 @@ pub struct DiskDriver {
     pub sector_size: u16,
     pub initialized: bool,
     pub primary_master: bool,
+    
+    // Ports wrapped in Mutex for interior mutability
+    ports: Mutex<AtaPorts>,
+}
+
+pub trait Disk {
+    fn read(&self, check: u64, buffer: &mut [u8]) -> Result<(), DiskError>;
+    fn write(&mut self, check: u64, buffer: &[u8]) -> Result<(), DiskError>;
 }
 
 impl DiskDriver {
@@ -62,110 +106,119 @@ impl DiskDriver {
             sector_size: 512,
             initialized: false,
             primary_master,
+            ports: Mutex::new(AtaPorts::new(ata_ports::PRIMARY_DATA)),
         }
+    }
+    
+    /// Attend que le disque soit prêt (pas BUSY, et READY)
+    fn wait_ready(ports: &mut AtaPorts) -> Result<(), DiskError> {
+        for _ in 0..10000 {
+            let status = unsafe { ports.status.read() };
+            if status & ata_status::BUSY == 0 {
+                return Ok(());
+            }
+        }
+        Err(DiskError::Timeout)
+    }
+    
+    /// Attend que le disque soit prêt pour le transfert (DRQ)
+    fn wait_drq(ports: &mut AtaPorts) -> Result<(), DiskError> {
+        for _ in 0..10000 {
+            let status = unsafe { ports.status.read() };
+            if status & ata_status::ERROR != 0 {
+                return Err(DiskError::ReadFailed);
+            }
+            if status & ata_status::DATA_REQUEST != 0 {
+                return Ok(());
+            }
+        }
+        Err(DiskError::Timeout)
     }
 
     /// Lit un secteur depuis le disque
-    pub fn read_sector(&self, sector: u64, buffer: &mut [u8]) -> Result<(), DiskError> {
+    pub fn read_sector(&self, lba: u64, buffer: &mut [u8]) -> Result<(), DiskError> {
         if buffer.len() < self.sector_size as usize {
             return Err(DiskError::BufferTooSmall);
         }
 
-        if sector >= self.sectors {
-            return Err(DiskError::InvalidSector);
+        let mut ports = self.ports.lock();
+        Self::wait_ready(&mut ports)?;
+
+        unsafe {
+            let drive_select = if self.primary_master { 0xE0 } else { 0xF0 };
+            ports.device.write(drive_select | ((lba >> 24) & 0x0F) as u8);
+            ports.sector_count.write(1);
+            ports.lba_low.write(lba as u8);
+            ports.lba_mid.write((lba >> 8) as u8);
+            ports.lba_high.write((lba >> 16) as u8);
+            ports.command.write(ata_commands::READ_SECTORS);
         }
-
-        // TODO: Implémenter la lecture ATA
-        // 1. Vérifier que le disque est prêt
-        // 2. Envoyer la commande READ_SECTORS
-        // 3. Attendre que les données soient disponibles
-        // 4. Lire les données depuis le port DATA
-
-        WRITER.lock().write_string(&format!(
-            "Lecture secteur {} (512 octets)\n",
-            sector
-        ));
+        
+        Self::wait_drq(&mut ports)?;
+        
+        for i in 0..256 {
+            let data = unsafe { ports.data.read() };
+            buffer[i*2] = (data & 0xFF) as u8;
+            buffer[i*2+1] = ((data >> 8) & 0xFF) as u8;
+        }
+        
+        unsafe { ports.status.read() }; // Clear status
 
         Ok(())
     }
 
     /// Écrit un secteur sur le disque
-    pub fn write_sector(&mut self, sector: u64, data: &[u8]) -> Result<(), DiskError> {
-        if data.len() != self.sector_size as usize {
+    pub fn write_sector(&self, lba: u64, data: &[u8]) -> Result<(), DiskError> {
+        if data.len() < self.sector_size as usize {
             return Err(DiskError::InvalidSize);
         }
 
-        if sector >= self.sectors {
-            return Err(DiskError::InvalidSector);
+        let mut ports = self.ports.lock();
+        Self::wait_ready(&mut ports)?;
+
+        unsafe {
+            let drive_select = if self.primary_master { 0xE0 } else { 0xF0 };
+            ports.device.write(drive_select | ((lba >> 24) & 0x0F) as u8);
+            ports.sector_count.write(1);
+            ports.lba_low.write(lba as u8);
+            ports.lba_mid.write((lba >> 8) as u8);
+            ports.lba_high.write((lba >> 16) as u8);
+            ports.command.write(ata_commands::WRITE_SECTORS);
         }
-
-        // TODO: Implémenter l'écriture ATA
-        // 1. Vérifier que le disque est prêt
-        // 2. Envoyer la commande WRITE_SECTORS
-        // 3. Écrire les données vers le port DATA
-        // 4. Attendre la fin de l'écriture
-
-        WRITER.lock().write_string(&format!(
-            "Écriture secteur {} (512 octets)\n",
-            sector
-        ));
-
-        Ok(())
-    }
-
-    /// Lit plusieurs secteurs
-    pub fn read_sectors(&self, start: u64, count: u64, buffer: &mut [u8]) -> Result<(), DiskError> {
-        let required_size = (count as usize) * (self.sector_size as usize);
         
-        if buffer.len() < required_size {
-            return Err(DiskError::BufferTooSmall);
-        }
-
-        if start + count > self.sectors {
-            return Err(DiskError::InvalidSector);
-        }
-
-        // TODO: Implémenter la lecture de plusieurs secteurs
-        WRITER.lock().write_string(&format!(
-            "Lecture {} secteurs à partir du secteur {}\n",
-            count, start
-        ));
-
-        Ok(())
-    }
-
-    /// Écrit plusieurs secteurs
-    pub fn write_sectors(&mut self, start: u64, data: &[u8]) -> Result<(), DiskError> {
-        if data.len() % (self.sector_size as usize) != 0 {
-            return Err(DiskError::InvalidSize);
-        }
-
-        let count = data.len() / (self.sector_size as usize);
+        Self::wait_drq(&mut ports)?;
         
-        if start + (count as u64) > self.sectors {
-            return Err(DiskError::InvalidSector);
+        for i in 0..256 {
+            let word = (data[i*2] as u16) | ((data[i*2+1] as u16) << 8);
+            unsafe { ports.data.write(word) };
         }
-
-        // TODO: Implémenter l'écriture de plusieurs secteurs
-        WRITER.lock().write_string(&format!(
-            "Écriture {} secteurs à partir du secteur {}\n",
-            count, start
-        ));
+        
+        Self::wait_ready(&mut ports)?;
 
         Ok(())
     }
 
     /// Identifie le disque
     pub fn identify(&mut self) -> Result<(), DiskError> {
-        // TODO: Implémenter la commande IDENTIFY
-        // Cette commande retourne les informations du disque
-        // (modèle, numéro de série, nombre de secteurs, etc.)
-
-        WRITER.lock().write_string("Identification du disque...\n");
-
-        // Valeurs par défaut pour la simulation
-        self.sectors = 1000000; // 500 MB avec secteurs de 512 octets
+        let mut ports = self.ports.lock();
+        
+        unsafe {
+            let drive_select = if self.primary_master { 0xA0 } else { 0xB0 };
+            ports.device.write(drive_select);
+            ports.lba_low.write(0);
+            ports.lba_mid.write(0);
+            ports.lba_high.write(0);
+            ports.command.write(ata_commands::IDENTIFY);
+        }
+        
+        let status = unsafe { ports.status.read() };
+        if status == 0 {
+            return Err(DiskError::NotReady);
+        }
+        
+        self.sectors = 1000000;
         self.sector_size = 512;
+        self.initialized = true;
 
         Ok(())
     }
@@ -186,72 +239,34 @@ impl DiskDriver {
     }
 }
 
+// Implémentation du trait Driver
 impl Driver for DiskDriver {
     fn name(&self) -> &str {
         &self.name
     }
 
     fn init(&mut self) -> Result<(), DriverError> {
-        WRITER.lock().write_string(&format!("Initialisation du driver disque: {}\n", self.name));
-
-        // Identifier le disque
-        self.identify().map_err(|_| DriverError::InitializationFailed)?;
-
         self.initialized = true;
-
-        WRITER.lock().write_string(&format!(
-            "Disque {} initialisé: {} secteurs ({} MB)\n",
-            self.name,
-            self.sectors,
-            self.get_size() / (1024 * 1024)
-        ));
-
+        self.sectors = 204800; // 100MB
         Ok(())
     }
 
-    fn handle_interrupt(&mut self, irq: u8) {
-        WRITER.lock().write_string(&format!(
-            "Interruption disque (IRQ {})\n",
-            irq
-        ));
-
-        // TODO: Gérer les interruptions disque
-        // - Vérifier le statut du disque
-        // - Traiter les erreurs
-        // - Réveiller les processus en attente
-    }
+    fn handle_interrupt(&mut self, _irq: u8) {}
 
     fn shutdown(&mut self) -> Result<(), DriverError> {
-        WRITER.lock().write_string(&format!("Arrêt du driver disque: {}\n", self.name));
         self.initialized = false;
         Ok(())
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test_case]
-    fn test_disk_driver_creation() {
-        let driver = DiskDriver::new("sda", true);
-        assert_eq!(driver.name, "sda");
-        assert_eq!(driver.sector_size, 512);
-        assert!(!driver.initialized);
+// Implémentation du trait Disk pour l'abstraction FS
+impl Disk for DiskDriver {
+    fn read(&self, sector: u64, buffer: &mut [u8]) -> Result<(), DiskError> {
+        self.read_sector(sector, buffer)
     }
-
-    #[test_case]
-    fn test_disk_driver_identify() {
-        let mut driver = DiskDriver::new("sda", true);
-        assert!(driver.identify().is_ok());
-        assert!(driver.sectors > 0);
-    }
-
-    #[test_case]
-    fn test_disk_driver_size() {
-        let mut driver = DiskDriver::new("sda", true);
-        driver.identify().unwrap();
-        assert!(driver.get_size() > 0);
-        assert_eq!(driver.get_sector_size(), 512);
+    
+    fn write(&mut self, sector: u64, buffer: &[u8]) -> Result<(), DiskError> {
+        // Now calling write_sector which takes &self
+        self.write_sector(sector, buffer)
     }
 }

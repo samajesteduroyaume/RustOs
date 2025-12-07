@@ -75,19 +75,15 @@ impl Dentry {
     /// Obtient le chemin complet de la dentry
     pub fn get_path(&self) -> String {
         let mut components = Vec::new();
-        let mut current = Some(self);
+        let current = Some(self);
 
         while let Some(dentry) = current {
             if dentry.name != "/" {
                 components.push(dentry.name.clone());
             }
-            current = dentry.parent.as_ref().map(|p| {
-                let locked = p.lock();
-                // On ne peut pas retourner une référence au contenu du Mutex
-                // donc on doit reconstruire la chaîne différemment
-                None
-            }).flatten();
-            break; // Simplification pour éviter les problèmes de lifetime
+            // Simplification pour éviter les problèmes de lifetime
+            // On ne peut pas traverser la chaîne parent à cause des Mutex
+            break;
         }
 
         if components.is_empty() {

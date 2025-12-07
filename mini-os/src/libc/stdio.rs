@@ -82,8 +82,9 @@ pub fn puts(s: &str) -> i32 {
 }
 
 /// Affiche un caractère
-pub fn putchar(c: char) {
+pub fn putchar(c: char) -> i32 {
     WRITER.lock().write_string(&format!("{}", c));
+    c as i32
 }
 
 /// Affiche une chaîne sans saut à la ligne

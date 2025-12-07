@@ -2,6 +2,9 @@
 /// 
 /// Gère les descripteurs, requêtes, et transferts USB
 
+extern crate alloc;
+use alloc::format;
+
 use alloc::vec::Vec;
 use alloc::string::String;
 
@@ -361,22 +364,28 @@ mod tests {
     #[test_case]
     fn test_device_descriptor() {
         let desc = DeviceDescriptor::new();
-        assert_eq!(desc.length, 18);
-        assert_eq!(desc.descriptor_type, 0x01);
+        let length = desc.length;
+        let descriptor_type = desc.descriptor_type;
+        assert_eq!(length, 18);
+        assert_eq!(descriptor_type, 0x01);
     }
 
     #[test_case]
     fn test_setup_packet_get_descriptor() {
         let packet = SetupPacket::get_descriptor(DescriptorType::Device, 0, 18);
-        assert_eq!(packet.request, UsbRequest::GetDescriptor as u8);
-        assert_eq!(packet.length, 18);
+        let request = packet.request;
+        let length = packet.length;
+        assert_eq!(request, UsbRequest::GetDescriptor as u8);
+        assert_eq!(length, 18);
     }
 
     #[test_case]
     fn test_setup_packet_set_address() {
         let packet = SetupPacket::set_address(5);
-        assert_eq!(packet.request, UsbRequest::SetAddress as u8);
-        assert_eq!(packet.value, 5);
+        let request = packet.request;
+        let value = packet.value;
+        assert_eq!(request, UsbRequest::SetAddress as u8);
+        assert_eq!(value, 5);
     }
 
     #[test_case]

@@ -5,18 +5,37 @@ use alloc::vec::Vec;
 use spin::Mutex;
 use lazy_static::lazy_static;
 
+#[cfg(feature = "usb")]
 pub mod usb_controller;
+#[cfg(feature = "usb")]
 pub mod usb_protocol;
+#[cfg(feature = "usb")]
 pub mod usb_mass_storage;
+#[cfg(feature = "usb")]
 pub mod usb_hid;
+
+pub mod serial_trait;
+pub mod mock_serial;
+pub mod disk;
+
+// Ré-exports
+pub use serial_trait::SerialPort;
+pub use mock_serial::MockSerial;
+
+#[cfg(feature = "bluetooth")]
 pub mod bluetooth_hci;
+#[cfg(feature = "bluetooth")]
 pub mod bluetooth_l2cap;
 
+#[cfg(feature = "usb")]
 pub use usb_controller::*;
-pub use usb_protocol::*;
+#[cfg(feature = "usb")]
 pub use usb_mass_storage::*;
+#[cfg(feature = "usb")]
 pub use usb_hid::*;
+#[cfg(feature = "bluetooth")]
 pub use bluetooth_hci::*;
+#[cfg(feature = "bluetooth")]
 pub use bluetooth_l2cap::*;
 
 /// Erreurs possibles des drivers
@@ -85,10 +104,7 @@ impl DriverManager {
         
         for name in driver_names {
             if let Err(e) = self.init_driver(&name) {
-                crate::vga_buffer::WRITER.lock().write_string(&format!(
-                    "Erreur initialisation driver {}: {:?}\n",
-                    name, e
-                ));
+                log::error!("Erreur initialisation driver {}: {:?}", name, e);
             }
         }
 

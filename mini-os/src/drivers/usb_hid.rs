@@ -1,8 +1,10 @@
 /// USB HID (Human Interface Device) Driver
 /// 
-/// Support pour claviers et souris USB
+/// Gère les périphériques HID comme les claviers, souris, etc.
 
+extern crate alloc;
 use alloc::vec::Vec;
+use alloc::format;
 use super::usb_protocol::*;
 use super::usb_controller::UsbError;
 use crate::vga_buffer::WRITER;

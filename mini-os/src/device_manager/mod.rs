@@ -8,7 +8,9 @@ use lazy_static::lazy_static;
 pub mod pci;
 pub mod ethernet;
 pub mod wifi;
+#[cfg(feature = "usb")]
 pub mod usb;
+#[cfg(feature = "bluetooth")]
 pub mod bluetooth;
 pub mod audio;
 pub mod video;
@@ -18,7 +20,9 @@ pub mod events;
 pub use pci::*;
 pub use ethernet::*;
 pub use wifi::*;
+#[cfg(feature = "usb")]
 pub use usb::*;
+#[cfg(feature = "bluetooth")]
 pub use bluetooth::*;
 pub use audio::*;
 pub use video::*;

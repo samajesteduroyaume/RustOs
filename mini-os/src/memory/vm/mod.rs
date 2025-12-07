@@ -13,6 +13,21 @@ use lazy_static::lazy_static;
 pub mod cow;
 pub use cow::{CowManager, COW_MANAGER};
 
+pub mod hugepage;
+pub use hugepage::{HugePageAllocator, PageSize, HugePageStats, HUGE_PAGE_ALLOCATOR};
+
+pub mod demand;
+pub use demand::{DemandPagingManager, LazyPage, DEMAND_PAGING_MANAGER, handle_page_fault};
+
+pub mod lru;
+pub use lru::{LRUPageCache, PageEntry, LRU_PAGE_CACHE};
+
+pub mod pagecache;
+pub use pagecache::{PageCache, PageCacheEntry, PAGE_CACHE};
+
+pub mod swap;
+pub use swap::{SwapDaemon, SwapEntry, SWAP_DAEMON};
+
 // Gestionnaire de cadre physique
 pub struct SimpleFrameAllocator {
     next: usize,

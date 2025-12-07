@@ -1,6 +1,14 @@
 # RustOS v1.1.0 - Système d'Exploitation Moderne avec Détection Automatique
 
-RustOS est un système d'exploitation moderne et sûr, écrit entièrement en Rust. Il combine une architecture de noyau multitâche avec une pile logicielle complète incluant un shell, une librairie standard, des drivers matériels, une pile réseau complète et la détection automatique de tous les périphériques.
+RustOS est un système d'exploitation minimaliste et éducatif écrit en Rust. Il combine une architecture de noyau multitâche avec une pile logicielle complète incluant un shell, une librairie standard, des drivers matériels, une pile réseau complète et la détection automatique de tous les périphériques.
+
+## Fonctionnalités principales
+- Noyau avec support Ring 0 (noyau) et Ring 3 (utilisateur)
+- Gestion des processus
+- Isolation mémoire
+- Système de fichiers virtuel
+- Gestion des périphériques
+- Appels système sécurisés
 
 ## 🎯 Caractéristiques Principales
 
@@ -12,6 +20,13 @@ RustOS est un système d'exploitation moderne et sûr, écrit entièrement en Ru
 - ✅ Primitives de synchronisation (Semaphore, Mutex, CondVar, Barrier)
 - ✅ Gestion des descripteurs de fichiers
 - ✅ Framework d'appels système
+- ✅ **Loader ELF 64-bits** (Nouveau)
+
+### Système de Fichiers (v1.2.0)
+- ✅ **RamFS (In-Memory Filesystem)** (Nouveau)
+- ✅ VFS Abstraction (open, read, write, mkdir, ls)
+- ✅ Intégration Shell complète
+- ✅ Support écriture et suppression
 
 ### Détection Automatique des Périphériques (v1.1.0)
 - ✅ Détection Ethernet automatique
@@ -30,6 +45,7 @@ RustOS est un système d'exploitation moderne et sûr, écrit entièrement en Ru
 - Éditeur de ligne complet avec historique
 - Variables d'environnement
 - Parser de commandes
+- **Redirection de sortie (`>`)** (Nouveau)
 
 #### Librairie Standard (libc)
 - **stdio** : printf, fprintf, sprintf, puts, putchar, fputs
@@ -40,6 +56,7 @@ RustOS est un système d'exploitation moderne et sûr, écrit entièrement en Ru
 - Gestionnaire de drivers centralisé
 - Driver Disque ATA/SATA
 - Driver Réseau Ethernet
+- **Correctifs de stabilité (Alignement packed structs)** (Nouveau)
 
 #### Pile Réseau Complète
 - IPv4 avec checksum
@@ -61,14 +78,13 @@ RustOS est un système d'exploitation moderne et sûr, écrit entièrement en Ru
 ## 📊 Statistiques
 
 ```
-Lignes de code           : 8671 lignes (+35% vs v1.0.0)
-Modules implémentés      : 25 modules (+67% vs v1.0.0)
-Structures créées        : 44 structures (+83% vs v1.0.0)
-Fonctions implémentées   : 240+ fonctions (+41% vs v1.0.0)
-Tests unitaires          : 80+ tests (+14% vs v1.0.0)
-Commandes shell          : 22 commandes (+47% vs v1.0.0)
-Documentation            : 100+ pages
-Performance              : -22.5% temps (+35% vs v1.0.0)
+Lignes de code           : 9500 lignes (+9.5% vs v1.1.0)
+Modules implémentés      : 28 modules (+12% vs v1.1.0)
+Structures créées        : 50 structures (+13% vs v1.1.0)
+Fonctions implémentées   : 260+ fonctions (+8% vs v1.1.0)
+Tests unitaires          : 90+ tests (+12% vs v1.1.0)
+Commandes shell          : 22 commandes
+Opérations VFS           : 8 opérations (Nouveau)
 ```
 
 ## 📁 Structure du Projet
@@ -82,9 +98,10 @@ RustOS/
 │   │   ├── libc/           - Librairie Standard
 │   │   ├── drivers/        - Drivers Matériels
 │   │   ├── network/        - Pile Réseau
-│   │   ├── process/        - Gestion des Processus (v0.2.0)
-│   │   ├── scheduler/      - Planificateur (v0.2.0)
-│   │   ├── sync/           - Synchronisation (v0.2.0)
+│   │   ├── process/        - Gestion des Processus & ELF Loader
+│   │   ├── scheduler/      - Planificateur
+│   │   ├── sync/           - Synchronisation
+│   │   ├── fs/             - VFS et RamFS (Nouveau)
 │   │   └── main.rs
 │   └── Cargo.toml
 ├── docs/                   - Documentation
@@ -113,30 +130,38 @@ cargo test
 ## 📚 Documentation
 
 ### Documentation principale
-- **[PROJECT_COMPLETE.md](PROJECT_COMPLETE.md)** - Résumé complet du projet
 - **[CHANGELOG.md](CHANGELOG.md)** - Historique des modifications
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Vue d'ensemble de l'architecture
+- **[docs/](docs/)** - Documentation complète du projet
 
 ### Guides développeur
 - **[docs/multitasking.md](docs/multitasking.md)** - Guide du noyau multitâche
 - **[docs/synchronization.md](docs/synchronization.md)** - Guide des primitives de synchronisation
+- **[docs/ring3_guide.md](docs/ring3_guide.md)** - Guide du mode utilisateur (Ring 3)
 
 > Les anciens documents de planification détaillée et de phases d'implémentation ont été archivés dans `docs/archived/` pour ne pas surcharger la racine du projet.
 
 ## 🧪 Tests
 
-RustOS inclut 70 tests unitaires couvrant tous les modules :
-- Shell : 3 tests
-- Terminal : 4 tests
-- libc : 12 tests
-- Drivers : 10 tests
-- Network : 21 tests
-- Tools : 20 tests
+RustOS inclut **50+ tests unitaires** documentés dans le code source couvrant tous les modules :
+- Device Manager : 16+ tests
+- Network : 20+ tests (TCP, UDP, ICMP, DNS)
+- Drivers : 10+ tests (USB, Bluetooth, HID)
+- Shell : 3+ tests
+- Filesystem : 4+ tests
 
-Exécutez les tests avec :
+### ⚠️ Note Importante sur les Tests
+
+En raison de la nature bare-metal (no_std) du projet, **les tests unitaires ne peuvent pas être exécutés avec `cargo test --lib`**. Ils sont documentés dans le code et servent de spécification.
+
+**Tests d'intégration disponibles** :
 ```bash
-cargo test
+# Tests du système de fichiers RamFS
+cd mini-os
+./run_ramfs_tests.sh
 ```
+
+**Pour plus d'informations** : Consultez [TESTING.md](mini-os/TESTING.md) pour un guide complet sur les tests.
 
 ## 🎓 Architecture
 

@@ -266,7 +266,7 @@ pub fn mount_fs(
     fs: Arc<dyn FileSystemOps>,
     flags: MountFlags,
 ) -> VfsResult<()> {
-    let mut manager = MOUNT_MANAGER.lock();
+    let manager = MOUNT_MANAGER.lock();
 
     // Résoudre le chemin du point de montage
     let root_mount = manager.root_mount().ok_or(VfsError::NotFound)?;
