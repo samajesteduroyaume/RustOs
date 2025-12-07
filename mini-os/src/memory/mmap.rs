@@ -43,7 +43,7 @@ pub enum MmapError {
 pub enum MmapType {
     /// Mapping anonyme (mémoire)
     Anonymous,
-    /// Mapping de fichier
+    /// Je dois voir le fichier avant de remplacer
     File { file_id: u64, offset: u64 },
 }
 
@@ -125,7 +125,7 @@ pub struct MmapManager {
 
 impl MmapManager {
     /// Crée un nouveau gestionnaire
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             regions: BTreeMap::new(),
             next_virt_addr: VirtAddr::new(0x7000_0000_0000), // Début de la zone mmap

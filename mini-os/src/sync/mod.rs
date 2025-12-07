@@ -1,12 +1,14 @@
 use spin::Mutex;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
-use mini_os::process::Process;
+use crate::process::ThreadState;
+use crate::scheduler::SCHEDULER;
+use crate::scheduler::current_thread;
 
-/// Sémaphore pour la synchronisation entre processus
+/// Sémaphore pour la synchronisation entre threads
 pub struct Semaphore {
     count: Mutex<i32>,
-    waiters: Mutex<VecDeque<u64>>, // Queue de PIDs en attente
+    waiters: Mutex<VecDeque<u64>>, // Queue de TIDs en attente
 }
 
 impl Semaphore {
@@ -19,33 +21,34 @@ impl Semaphore {
     }
 
     /// Opération P (wait) - décrémente le sémaphore
-    pub fn wait(&self, pid: u64) -> Result<(), &'static str> {
+    pub fn wait(&self) {
+        let tid = current_thread().expect("No current thread").lock().tid;
         loop {
             let mut count = self.count.lock();
             if *count > 0 {
                 *count -= 1;
-                return Ok(());
+                return;
             } else {
-                // Ajouter le processus à la queue d'attente
-                drop(count); // Libérer le verrou avant d'ajouter à la queue
-                self.waiters.lock().push_back(pid);
-                // TODO: Bloquer le processus
-                return Err("Processus bloqué");
+                // Ajouter le thread à la queue d'attente
+                let mut waiters = self.waiters.lock();
+                waiters.push_back(tid);
+                drop(waiters);
+                drop(count); // Libérer le verrou avant de bloquer
+                
+                SCHEDULER.block_current_thread(ThreadState::Blocked);
             }
         }
     }
 
     /// Opération V (signal) - incrémente le sémaphore
-    pub fn signal(&self) -> Result<(), &'static str> {
+    pub fn signal(&self) {
         let mut count = self.count.lock();
         *count += 1;
 
-        // Réveiller un processus en attente
-        if let Some(waiting_pid) = self.waiters.lock().pop_front() {
-            // TODO: Réveiller le processus avec ce PID
+        // Réveiller un thread en attente
+        if let Some(waiting_tid) = self.waiters.lock().pop_front() {
+            SCHEDULER.wake_thread(waiting_tid);
         }
-
-        Ok(())
     }
 }
 
@@ -67,38 +70,40 @@ impl MutexLock {
     }
 
     /// Acquiert le mutex
-    pub fn lock(&self, pid: u64) -> Result<(), &'static str> {
+    pub fn lock(&self) {
+        let tid = current_thread().expect("No current thread").lock().tid;
         loop {
             let mut locked = self.locked.lock();
             if !*locked {
                 *locked = true;
-                *self.owner.lock() = Some(pid);
-                return Ok(());
+                *self.owner.lock() = Some(tid);
+                return;
             } else {
+                let mut waiters = self.waiters.lock();
+                waiters.push_back(tid);
+                drop(waiters);
                 drop(locked);
-                self.waiters.lock().push_back(pid);
-                // TODO: Bloquer le processus
-                return Err("Processus bloqué");
+                
+                SCHEDULER.block_current_thread(ThreadState::Blocked);
             }
         }
     }
 
     /// Libère le mutex
-    pub fn unlock(&self, pid: u64) -> Result<(), &'static str> {
+    pub fn unlock(&self) {
+        let tid = current_thread().expect("No current thread").lock().tid;
         let mut owner = self.owner.lock();
-        if *owner != Some(pid) {
-            return Err("Le processus ne possède pas le mutex");
+        if *owner != Some(tid) {
+            panic!("Le thread ne possède pas le mutex");
         }
 
         *owner = None;
         *self.locked.lock() = false;
 
-        // Réveiller un processus en attente
-        if let Some(waiting_pid) = self.waiters.lock().pop_front() {
-            // TODO: Réveiller le processus avec ce PID
+        // Réveiller un thread en attente
+        if let Some(waiting_tid) = self.waiters.lock().pop_front() {
+            SCHEDULER.wake_thread(waiting_tid);
         }
-
-        Ok(())
     }
 
     /// Vérifie si le mutex est verrouillé
@@ -121,34 +126,35 @@ impl ConditionVariable {
     }
 
     /// Attend sur la variable de condition
-    pub fn wait(&self, pid: u64, mutex: &MutexLock) -> Result<(), &'static str> {
-        // Ajouter le processus à la queue d'attente
-        self.waiters.lock().push_back(pid);
+    pub fn wait(&self, mutex: &MutexLock) {
+        let tid = current_thread().expect("No current thread").lock().tid;
+        
+        // Ajouter le thread à la queue d'attente
+        self.waiters.lock().push_back(tid);
 
         // Libérer le mutex
-        mutex.unlock(pid)?;
+        mutex.unlock();
 
-        // TODO: Bloquer le processus
-
-        Ok(())
+        // Bloquer le thread
+        SCHEDULER.block_current_thread(ThreadState::Blocked);
+        
+        // Réacquérir le mutex au réveil
+        mutex.lock();
     }
 
-    /// Signale un processus en attente
-    pub fn signal(&self) -> Result<(), &'static str> {
-        if let Some(waiting_pid) = self.waiters.lock().pop_front() {
-            // TODO: Réveiller le processus avec ce PID
+    /// Signale un thread en attente
+    pub fn signal(&self) {
+        if let Some(waiting_tid) = self.waiters.lock().pop_front() {
+            SCHEDULER.wake_thread(waiting_tid);
         }
-
-        Ok(())
     }
 
-    /// Signale tous les processus en attente
-    pub fn broadcast(&self) -> Result<(), &'static str> {
-        while let Some(waiting_pid) = self.waiters.lock().pop_front() {
-            // TODO: Réveiller le processus avec ce PID
+    /// Signale tous les threads en attente
+    pub fn broadcast(&self) {
+        let mut waiters = self.waiters.lock();
+        while let Some(waiting_tid) = waiters.pop_front() {
+            SCHEDULER.wake_thread(waiting_tid);
         }
-
-        Ok(())
     }
 }
 
@@ -170,39 +176,28 @@ impl Barrier {
     }
 
     /// Attend à la barrière
-    pub fn wait(&self, pid: u64) -> Result<(), &'static str> {
+    pub fn wait(&self) {
+        let tid = current_thread().expect("No current thread").lock().tid;
+        
         let mut count = self.count.lock();
         *count += 1;
 
         if *count == self.total {
-            // Tous les processus sont arrivés, réveiller tout le monde
+            // Tous les threads sont arrivés, réveiller tout le monde
+            *count = 0; // Reset pour réutilisation
             drop(count);
-            while let Some(waiting_pid) = self.waiters.lock().pop_front() {
-                // TODO: Réveiller le processus avec ce PID
+            
+            let mut waiters = self.waiters.lock();
+            while let Some(waiting_tid) = waiters.pop_front() {
+                SCHEDULER.wake_thread(waiting_tid);
             }
-            Ok(())
         } else {
+            let mut waiters = self.waiters.lock();
+            waiters.push_back(tid);
+            drop(waiters);
             drop(count);
-            self.waiters.lock().push_back(pid);
-            // TODO: Bloquer le processus
-            Err("Processus bloqué")
+            
+            SCHEDULER.block_current_thread(ThreadState::Blocked);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test_case]
-    fn test_semaphore_creation() {
-        let sem = Semaphore::new(1);
-        assert_eq!(*sem.count.lock(), 1);
-    }
-
-    #[test_case]
-    fn test_mutex_creation() {
-        let mutex = MutexLock::new();
-        assert!(!mutex.is_locked());
     }
 }

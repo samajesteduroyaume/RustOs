@@ -10,6 +10,10 @@ SECTIONS
     *(.text*)
   }
 
+  .trampoline : {
+    KEEP(*(.trampoline))
+  }
+
   .rodata : { *(.rodata*) }
   .data : { *(.data*) }
   .bss : { *(.bss*) }

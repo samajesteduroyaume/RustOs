@@ -779,7 +779,7 @@ impl<D: Disk> Ext2<D> {
         
         // Vérifier si le fichier existe déjà
         let existing_entry = self.find_entry_in_dir(&dir_inode, file_name);
-        let mut inode_num = match existing_entry {
+        let inode_num = match existing_entry {
             Ok(entry) => {
                 // Le fichier existe, on le tronque
                 let inode = self.get_inode(entry.inode)?;

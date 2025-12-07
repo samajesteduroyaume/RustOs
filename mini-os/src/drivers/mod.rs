@@ -17,10 +17,17 @@ pub mod usb_hid;
 pub mod serial_trait;
 pub mod mock_serial;
 pub mod disk;
+pub mod nvme;
+pub mod nvme_cache;
+pub mod nvme_queue;
+pub mod gpu;
 
 // Ré-exports
 pub use serial_trait::SerialPort;
 pub use mock_serial::MockSerial;
+pub use nvme::{NVMeController, NVMeNamespace, NVMeError, NVMeStats, NVME_CONTROLLER, NVME_BLOCK_SIZE};
+pub use nvme_cache::{CachedStorage, CACHED_STORAGE, CachedStorageStats, init_storage};
+pub use nvme_queue::{IoQueueManager, IO_QUEUE_MANAGER, IoQueueStats, NUM_IO_QUEUES};
 
 #[cfg(feature = "bluetooth")]
 pub mod bluetooth_hci;

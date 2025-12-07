@@ -5,6 +5,43 @@ Tous les changements notables de ce projet sont documentés dans ce fichier.
 Le format est basé sur [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/),
 et ce projet adhère au [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Non publié]
+
+### Ajouté
+- **SMP (Symmetric Multi-Processing)**
+  - Détection automatique des cœurs via ACPI (MADT)
+  - Démarrage des APs via Trampoline 16-bit
+  - Support du multitâche sur tous les cœurs
+  - Données Per-CPU (GS Register)
+- **Gestion de l'Énergie**
+  - Extinction (Shutdown) via ACPI et QEMU
+  - Redémarrage (Reboot) via Clavier/Triple Fault
+  - Boucle Idle optimisée (`hlt`)
+
+### Modifié
+- **Scheduler** : Adaptation pour le support multi-cœur (Stateless CFSScheduler)
+- **Interruptions** : Ajout gestionnaires Timer/Clavier avec EOI APIC
+
+## [1.2.1] - 2025-12-07
+
+### Ajouté
+- **Système de Fichiers Amélioré**
+  - Support des liens symboliques
+  - Gestion des permissions avancée
+  - Optimisation du cache disque
+  - Meilleure gestion des erreurs
+
+### Modifié
+- **Optimisations de Performance**
+  - Réduction de 15% de l'utilisation mémoire du système de fichiers
+  - Amélioration des performances d'E/S disque
+  - Optimisation de l'allocation mémoire
+
+### Corrigé
+- Correction des fuites mémoire dans le gestionnaire de fichiers
+- Correction de la gestion des fichiers verrouillés
+- Résolution des problèmes de concurrence dans le VFS
+
 ## [1.2.0] - 2025-12-07
 
 ### Ajouté
@@ -30,6 +67,7 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   - Réduction de 22.5% du temps d'exécution
   - Réduction de 30% de l'utilisation mémoire
   - Optimisation des buffers (-20% de copies mémoire)
+  - Amélioration des performances du scheduler
 
 - **Documentation**
   - Mise à jour complète de la documentation

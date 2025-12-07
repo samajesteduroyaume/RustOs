@@ -15,26 +15,23 @@ use crate::memory::vm::{VMManager, VM_MANAGER};
 pub mod elf;
 use self::elf::{ElfFile, PT_LOAD, PF_X, PF_W, PF_R};
 
+pub mod thread;
+pub use thread::{Thread, ThreadContext, ThreadState};
+
 pub mod signal;
 use self::signal::{SignalQueue, SignalHandlerTable};
 
 /// Niveau de priorité d'un processus
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ProcessPriority {
-    /// Priorité temps réel (la plus haute)
     Realtime = 0,
-    /// Priorité haute
     High = 1,
-    /// Priorité normale (par défaut)
     Normal = 2,
-    /// Priorité basse
     Low = 3,
-    /// Priorité idle (la plus basse)
     Idle = 4,
 }
 
 impl ProcessPriority {
-    /// Convertit un u8 en ProcessPriority
     pub fn from_u8(value: u8) -> Self {
         match value {
             0 => ProcessPriority::Realtime,
@@ -45,13 +42,10 @@ impl ProcessPriority {
         }
     }
 
-    /// Convertit ProcessPriority en u8
     pub fn to_u8(self) -> u8 {
         self as u8
     }
 
-    /// Retourne le poids du processus pour le scheduler CFS
-    /// Plus la priorité est haute, plus le poids est élevé
     pub fn weight(self) -> u64 {
         match self {
             ProcessPriority::Realtime => 1024,
@@ -72,198 +66,158 @@ impl Default for ProcessPriority {
 /// État d'un processus
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessState {
-    /// Le processus est prêt à être exécuté
     Ready,
-    /// Le processus est en cours d'exécution
     Running,
-    /// Le processus est bloqué en attente d'une ressource
     Blocked,
-    /// Le processus a terminé son exécution
     Terminated,
-}
-
-/// Représente le contexte d'exécution d'un processus
-#[derive(Debug, Clone)]
-pub struct ProcessContext {
-    /// Pointeur de pile (RSP)
-    pub rsp: u64,
-    /// Pointeur d'instruction (RIP)
-    pub rip: u64,
-    /// Registres généraux
-    pub registers: [u64; 16],
-    /// Pointeur vers la table des pages
-    pub page_table: Arc<Mutex<PageTable>>,
-    /// Niveau de privilège (0 = Ring 0, 3 = Ring 3)
-    pub privilege_level: u8,
-    /// Pointeur de pile utilisateur (pour Ring 3)
-    pub user_rsp: u64,
-}
-
-impl Default for ProcessContext {
-    fn default() -> Self {
-        Self {
-            rsp: 0,
-            rip: 0,
-            registers: [0; 16],
-            page_table: Arc::new(Mutex::new(PageTable::new())),
-            privilege_level: 0, // Ring 0 par défaut
-            user_rsp: 0,
-        }
-    }
 }
 
 /// Représente un processus
 pub struct Process {
-    /// Identifiant unique du processus
+    /// Identifiant unique du processus (PID)
     pub pid: u64,
     /// Nom du processus
     pub name: String,
-    /// État actuel du processus
+    /// État du processus
     pub state: ProcessState,
-    /// Contexte d'exécution
-    pub context: ProcessContext,
     /// Priorité du processus
     pub priority: ProcessPriority,
-    /// Adresse de la pile noyau
-    pub kstack: Option<PhysAddr>,
-    /// ID de l'espace d'adressage
-    pub address_space_id: usize,
-    /// Pages marquées en lecture seule pour CoW
-    pub cow_pages: Vec<PhysFrame>,
-    /// Temps CPU virtuel utilisé (pour CFS scheduler)
-    pub vruntime: u64,
-    /// Temps CPU réel utilisé (en ticks)
-    pub cpu_time: u64,
-    /// Timestamp du dernier scheduling
-    pub last_scheduled: u64,
-    /// Queue de signaux en attente
+    /// ID de l'espace d'adressage (CR3)
+    pub address_space_id: u64,
+    /// Pages en copie sur écriture (CoW)
+    pub cow_pages: Vec<u64>,
+    /// File d'attente des signaux
     pub signal_queue: SignalQueue,
-    /// Table des handlers de signaux
+    /// Gestionnaires de signaux
     pub signal_handlers: SignalHandlerTable,
+    /// Threads du processus
+    pub threads: Vec<Arc<Mutex<Thread>>>,
 }
 
 impl Process {
-    /// Crée un nouveau processus
-    pub fn new(name: &str, _entry_point: fn() -> !, priority: ProcessPriority) -> Result<Self, &'static str> {
-        // Créer un nouvel espace d'adressage pour le processus
+    /// Crée un nouveau processus avec un thread principal
+    pub fn new(pid: u64, name: &str, _entry_point: fn() -> !, priority: ProcessPriority) -> Result<Self, &'static str> {
         let address_space_id = VM_MANAGER
             .lock()
             .as_mut()
             .ok_or("Gestionnaire de mémoire virtuelle non initialisé")?
             .create_process_space();
-        
-        // TODO: Allouer une pile noyau
-        // TODO: Configurer la pile utilisateur
-        // TODO: Initialiser le contexte d'exécution
-        
-        Ok(Self {
-            pid: 0, // Le PID sera défini par le gestionnaire de processus
+            
+        let mut process = Self {
+            pid,
             name: String::from(name),
             state: ProcessState::Ready,
-            context: ProcessContext::default(),
             priority,
-            kstack: None,
-            address_space_id,
+            address_space_id: address_space_id as u64,
             cow_pages: Vec::new(),
-            vruntime: 0,
-            cpu_time: 0,
-            last_scheduled: 0,
             signal_queue: SignalQueue::new(),
             signal_handlers: SignalHandlerTable::new(),
-        })
+            threads: Vec::new(),
+        };
+
+        // Création du thread principal
+        // Note: Le TID devrait être unique globalement. Pour l'instant on utilise pid * 1000 (hack).
+        // Il faudrait un ThreadManager.
+        let main_thread = Arc::new(Mutex::new(Thread::new(
+            pid * 1000 + 1, 
+            pid, 
+            "main", 
+            priority,
+            0 // CR3 à charger (TODO: récupérer du VMManager)
+        )));
+        
+        // Setup IP/SP du thread
+        {
+            let mut thread = main_thread.lock();
+            thread.context.rip = _entry_point as u64;
+            // thread.context.rsp = ...; // Stack setup
+        }
+
+        process.threads.push(main_thread);
+        
+        Ok(process)
     }
-    
-    /// Définit la priorité du processus
+
+    /// Définit la priorité du processus et de tous ses threads
     pub fn set_priority(&mut self, priority: ProcessPriority) {
         self.priority = priority;
+        for thread in &self.threads {
+            thread.lock().set_priority(priority);
+        }
     }
     
     /// Obtient la priorité du processus
     pub fn get_priority(&self) -> ProcessPriority {
         self.priority
     }
-    
-    /// Met à jour le temps CPU virtuel (vruntime) pour le scheduler CFS
-    pub fn update_vruntime(&mut self, delta_time: u64) {
-        // Le vruntime augmente inversement proportionnel au poids
-        // Plus le poids est élevé (haute priorité), moins le vruntime augmente
-        let weight = self.priority.weight();
-        self.vruntime += (delta_time * 1024) / weight;
-        self.cpu_time += delta_time;
-    }
-    
-    /// Traite les signaux en attente pour ce processus
-    /// Retourne true si le processus doit être terminé
-    pub fn deliver_pending_signals(&mut self) -> bool {
-        signal::SignalManager::deliver_signals(self)
-    }
-    
+
     /// Duplique le processus (fork)
-    pub fn fork(&self) -> Result<Self, &'static str> {
-        // Créer un nouvel espace d'adressage en copiant l'actuel
+    /// Note: Cela duplique l'espace d'adressage et on suppose qu'on fork depuis un thread spécifique qui deviendra le main thread du fils
+    pub fn fork(&self, current_thread: &Thread, new_pid: u64) -> Result<Self, &'static str> {
         let address_space_id = VM_MANAGER
             .lock()
             .as_mut()
             .ok_or("Gestionnaire de mémoire virtuelle non initialisé")?
             .create_process_space();
         
-        // Marquer toutes les pages en lecture seule pour CoW
+        // Marquer pages CoW (TODO)
         let cow_pages = Vec::new();
-        // TODO: Itérer sur toutes les pages du processus et les marquer en lecture seule
-        
-        let new_process = Self {
-            pid: 0, // Le PID sera défini par le gestionnaire de processus
+
+        let mut new_process = Self {
+            pid: new_pid,
             name: format!("{}_child", self.name),
             state: ProcessState::Ready,
-            context: self.context.clone(),
             priority: self.priority,
-            kstack: None, // La pile noyau sera dupliquée
-            address_space_id,
+            address_space_id: address_space_id as u64,
             cow_pages,
-            vruntime: self.vruntime,
-            cpu_time: 0, // Le processus enfant commence avec 0 temps CPU
-            last_scheduled: 0,
-            signal_queue: SignalQueue::new(), // Nouvelle queue pour l'enfant
-            signal_handlers: self.signal_handlers.clone(), // Hérite des handlers du parent
+            signal_queue: SignalQueue::new(),
+            signal_handlers: self.signal_handlers.clone(),
+            threads: Vec::new(),
         };
         
-        // TODO: Configurer le contexte pour le retour de fork
+        // Dupliquer le thread courant
+        let new_tid = new_pid * 1000 + 1; // Hack TID
+        let mut new_thread = Thread::new(
+            new_tid,
+            new_pid,
+            &current_thread.name,
+            current_thread.priority,
+            0 // CR3 TODO
+        );
+        
+        // Copier le contexte
+        new_thread.context = current_thread.context.clone();
+        // Ajuster context pour retour de fork (rax=0)
+        new_thread.context.registers[0] = 0; // RAX = 0 pour l'enfant
+
+        new_process.threads.push(Arc::new(Mutex::new(new_thread)));
         
         Ok(new_process)
     }
-    
-    /// Sauvegarde le contexte d'exécution actuel
-    pub fn save_context(&mut self) {
-        // TODO: Implémenter la sauvegarde du contexte
-        unimplemented!()
-    }
-    
-    /// Restaure le contexte d'exécution
-    pub fn restore_context(&self) {
-        // TODO: Implémenter la restauration du contexte
-        unsafe {
-            asm!(
-                "mov rsp, {rsp}",
-                "ret",
-                rsp = in(reg) self.context.rsp,
-                options(noreturn)
-            );
-        }
-    }
-    
-    /// Lance le processus en Ring 3
-    pub fn execute_in_ring3(&self) -> ! {
-        // Vérifier que le processus est configuré pour Ring 3
-        if self.context.privilege_level != 3 {
-            panic!("Process not configured for Ring 3 execution");
-        }
+
+    /// Ajoute un nouveau thread au processus
+    pub fn create_thread(&mut self, entry_point: u64) -> Result<Arc<Mutex<Thread>>, &'static str> {
+        // Générer un TID (Hack: pid * 1000 + count)
+        let tid = self.pid * 1000 + (self.threads.len() as u64) + 1;
         
-        // TODO: Charger la table des pages du processus
-        // TODO: Configurer les registres
-        // TODO: Basculer vers Ring 3
+        let mut thread = Thread::new(
+            tid,
+            self.pid,
+            &format!("{}_th{}", self.name, tid),
+            self.priority,
+            self.address_space_id // CR3
+        );
         
-        // Pour l'instant, boucle infinie
-        loop {}
+        // Setup IP
+        thread.context.rip = entry_point;
+        
+        // TODO: Allouer une nouvelle pile pour le thread
+        // thread.context.rsp = ...
+        
+        let thread_ref = Arc::new(Mutex::new(thread));
+        self.threads.push(thread_ref.clone());
+        
+        Ok(thread_ref)
     }
 }
 
@@ -271,8 +225,6 @@ impl Process {
 pub struct ProcessManager {
     /// Liste des processus
     processes: Vec<Arc<Mutex<Process>>>,
-    /// PID du processus actuellement en cours d'exécution
-    current_pid: Option<u64>,
     /// Compteur pour générer des PID uniques
     next_pid: u64,
     /// Gestionnaire de mémoire virtuelle
@@ -284,8 +236,7 @@ impl ProcessManager {
     pub fn new() -> Self {
         Self {
             processes: Vec::new(),
-            current_pid: None,
-            next_pid: 1, // Le PID 0 est réservé pour le processus idle
+            next_pid: 1, // Le PID 0 est réservé pour le processus idle (ou kernel)
             vm_manager: Some(&VM_MANAGER),
         }
     }
@@ -295,11 +246,16 @@ impl ProcessManager {
         let pid = self.next_pid;
         self.next_pid += 1;
         
-        let mut process = Process::new(name, entry_point, priority)?;
-        process.pid = pid;
+        let process_struct = Process::new(pid, name, entry_point, priority)?;
         
-        let process = Arc::new(Mutex::new(process));
+        // Récupérer le thread principal avant d'encapsuler dans le Mutex si possible, ou après via lock
+        let main_thread = process_struct.threads[0].clone();
+        
+        let process = Arc::new(Mutex::new(process_struct));
         self.processes.push(process);
+        
+        // Ajouter le thread au scheduler
+        crate::scheduler::SCHEDULER.add_thread(main_thread);
         
         Ok(pid)
     }
@@ -322,107 +278,95 @@ impl ProcessManager {
         let pid = self.next_pid;
         self.next_pid += 1;
         
-        // Logique de chargement simulée pour l'instant
-        // TODO: Implémenter l'allocation mémoire réelle avec VMManager
-        for ph in elf.program_headers() {
-            if ph.p_type == PT_LOAD {
-                // Segment à charger
-                let _vaddr = ph.p_vaddr;
-                let _memsz = ph.p_memsz;
-                let _filesz = ph.p_filesz;
-                let _flags = ph.p_flags;
-                
-                // Pour un vrai OS :
-                // 1. Allouer des frames physiques
-                // 2. Mapper vaddr -> frames dans le page table du process
-                // 3. Copier les données depuis elf.data[ph.p_offset..]
-                // 4. Zero-fill le reste (bss)
-            }
-        }
+        // Logique de chargement simulée (TODO: VMManager real alloc)
+        // ... (parsing segments) ...
         
-        let mut vm_manager = self.vm_manager.unwrap().lock();
-        if vm_manager.is_none() {
-            return Err("VMManager not initialized");
-        }
-        let vm = vm_manager.as_mut().unwrap();
-        let address_space_id = vm.create_process_space();
+        // Création process via new (avec dummy entry point, on overwrite après)
+        fn dummy_entry() -> ! { loop {} }
+        let process = Process::new(pid, name, dummy_entry, ProcessPriority::Normal)?;
         
+        // Overwrite du thread context
         let entry_point = elf.header.e_entry;
-        
-        // Création du Process struct
-        let mut process = Process {
-            pid,
-            name: String::from(name),
-            state: ProcessState::Ready,
-            context: ProcessContext::default(),
-            priority: ProcessPriority::Normal,
-            kstack: None,
-            address_space_id,
-            cow_pages: Vec::new(),
-            vruntime: 0,
-            cpu_time: 0,
-            last_scheduled: 0,
-            signal_queue: SignalQueue::new(),
-            signal_handlers: SignalHandlerTable::new(),
-        };
-        
-        process.context.rip = entry_point;
-        // Stack init would normally involve mapping stack pages to the end of user space
+        {
+            let mut thread = process.threads[0].lock();
+            thread.context.rip = entry_point;
+            // thread.context.rsp = ...;
+        }
+
+        let main_thread = process.threads[0].clone();
 
         let process = Arc::new(Mutex::new(process));
         self.processes.push(process);
-
+        
+        // Ajouter le thread au scheduler
+        crate::scheduler::SCHEDULER.add_thread(main_thread);
+        
         Ok(pid)
     }
 
     /// Duplique le processus actuel (fork)
-    pub fn fork_process(&mut self) -> Result<u64, &'static str> {
-        let current_pid = self.current_pid.ok_or("Aucun processus en cours d'exécution")?;
+    /// Note: Nécessite de connaitre le thread courant.
+    /// Pour l'instant, on laisse en TODO car cela nécessite l'accès au Scheduler global qui n'est pas encore visible ici.
+    pub fn fork_process(&mut self, current_tid: u64) -> Result<u64, &'static str> {
+        // Trouver le process parent via TID (couteux sans map)
+        let parent_proc = self.processes.iter().find(|p| {
+            p.lock().threads.iter().any(|t| t.lock().tid == current_tid)
+        }).ok_or("Parent process not found")?.clone();
         
-        let current_process = self.processes
-            .iter()
-            .find(|p| p.lock().pid == current_pid)
-            .ok_or("Processus courant introuvable")?;
+        let current_thread_arc = parent_proc.lock().threads.iter()
+            .find(|t| t.lock().tid == current_tid)
+            .unwrap()
+            .clone();
+            
+        let current_thread = current_thread_arc.lock();
         
-        let new_process = current_process.lock().fork()?;
         let new_pid = self.next_pid;
-        
-        let mut new_process = new_process;
-        new_process.pid = new_pid;
-        
         self.next_pid += 1;
-        self.processes.push(Arc::new(Mutex::new(new_process)));
+        
+        let new_process_struct = parent_proc.lock().fork(&current_thread, new_pid)?;
+        let main_thread = new_process_struct.threads[0].clone();
+        
+        let new_process = Arc::new(Mutex::new(new_process_struct));
+        self.processes.push(new_process);
+        
+        // Ajouter le thread au scheduler
+        crate::scheduler::SCHEDULER.add_thread(main_thread);
         
         Ok(new_pid)
     }
     
-    /// Planifie le prochain processus à exécuter
-    pub fn schedule(&mut self) -> Option<Arc<Mutex<Process>>> {
-        // TODO: Implémenter un algorithme de planification
-        // Pour l'instant, on utilise un simple round-robin
-        
-        let current_pos = self.current_pid.and_then(|pid| {
-            self.processes.iter().position(|p| p.lock().pid == pid)
-        }).unwrap_or(0);
-        
-        let next_pos = (current_pos + 1) % self.processes.len();
-        
-        if let Some(process) = self.processes.get(next_pos) {
-            self.current_pid = Some(process.lock().pid);
-            Some(process.clone())
-        } else {
-            None
+    /// Obtient un thread par son TID
+    pub fn get_thread_by_tid(&self, tid: u64) -> Option<Arc<Mutex<Thread>>> {
+        for p in &self.processes {
+            let p_lock = p.lock();
+            for t in &p_lock.threads {
+                if t.lock().tid == tid {
+                    return Some(t.clone());
+                }
+            }
         }
+        None
     }
-    
-    /// Obtient le PID du processus actuel
-    pub fn current_pid(&self) -> Option<u64> {
-        self.current_pid
-    }
-    
+
     /// Obtient la liste des processus
     pub fn processes(&self) -> &Vec<Arc<Mutex<Process>>> {
         &self.processes
+    }
+
+    /// Crée un thread dans un processus existant
+    pub fn create_thread(&mut self, pid: u64, entry_point: u64) -> Result<u64, &'static str> {
+        let process_lock = self.processes.iter()
+            .find(|p| p.lock().pid == pid)
+            .ok_or("Process not found")?
+            .clone();
+            
+        let mut process = process_lock.lock();
+        let thread = process.create_thread(entry_point)?;
+        let tid = thread.lock().tid;
+        
+        crate::scheduler::SCHEDULER.add_thread(thread);
+        
+        Ok(tid)
     }
 }
 
@@ -458,11 +402,16 @@ lazy_static! {
 
 /// Obtient le processus actuellement en cours d'exécution
 pub fn current_process() -> Option<Arc<Mutex<Process>>> {
+    let thread = crate::scheduler::current_thread()?;
+    let tid = thread.lock().tid;
+    
     let pm = PROCESS_MANAGER.lock();
-    let current_pid = pm.current_pid?;
-    pm.processes.iter()
-        .find(|p| p.lock().pid == current_pid)
-        .cloned()
+    for p in &pm.processes {
+        if p.lock().threads.iter().any(|t| t.lock().tid == tid) {
+            return Some(p.clone());
+        }
+    }
+    None
 }
 
 /// Obtient un processus par son PID
@@ -472,4 +421,9 @@ pub fn get_process_by_pid(pid: u64) -> Option<Arc<Mutex<Process>>> {
         .iter()
         .find(|p| p.lock().pid == pid)
         .cloned()
+}
+
+/// Obtient un thread par son TID
+pub fn get_thread_by_tid(tid: u64) -> Option<Arc<Mutex<Thread>>> {
+    PROCESS_MANAGER.lock().get_thread_by_tid(tid)
 }

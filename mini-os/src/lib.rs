@@ -22,10 +22,15 @@ extern crate alloc;
 
 // Modules du noyau
 pub mod memory;
+pub mod interrupts;
+pub mod keyboard;
+pub mod power;
 pub mod process;
 pub mod scheduler;
 pub mod syscall;
 pub mod fs;
+pub mod acpi;
+pub mod smp;
 pub mod fat32;
 pub mod ext2;
 pub mod gpt;
@@ -34,6 +39,8 @@ pub mod ring3_memory;
 pub mod ring3_example;
 pub mod vga_buffer;  // ← Ajouté pour les drivers
 pub mod drivers;
+pub mod net;
+pub mod ipc;
 
 // Modules pour les tests QEMU
 #[macro_use]
@@ -42,7 +49,8 @@ pub mod test_runner;
 
 // Ré-export des types importants
 pub use process::{Process, ProcessManager, ProcessState};
-pub use scheduler::{Scheduler, SchedulerPolicy};
+pub use scheduler::Scheduler;
+// pub use scheduler::SchedulerPolicy; // TODO: Re-enable when policy module is fixed
 pub use syscall::{SyscallHandler, SyscallNumber, SyscallResult, SyscallError};
 
 // Gestionnaire de panique personnalisé

@@ -31,7 +31,7 @@ bluetooth = []
 test-mode = []  # Mode test pour QEMU
 
 [dependencies]
-x86_64 = "0.15"
+x86_64 = "0.14.2"
 spin = { version = "0.9.8", features = ["spin_mutex"] }
 volatile = "0.2.7"
 pc-keyboard = { version = "0.5.1", default-features = false }
@@ -40,7 +40,7 @@ lazy_static = { version = "1.5.0", features = ["spin_no_std"] }
 log = { version = "0.4.29", default-features = false }
 raw-cpuid = "10.7.0"
 bit_field = "0.10.2"
-uart_16550 = "0.2.0"  # Pour la sortie série dans les tests
+uart_16550 = "0.2.0"
 
 # Pour le support de l'allocation
 linked_list_allocator = { version = "0.10.1", optional = true }
@@ -51,8 +51,7 @@ bootloader = { version = "0.9.23" }
 # Pour le support du système de fichiers
 vfs = { version = "0.8.0", optional = true }
 
-# Pour le support du réseau
-smoltcp = { version = "0.8.0", default-features = false, features = ["alloc", "log", "proto-ipv4", "proto-ipv6", "socket-udp", "socket-tcp", "socket-raw"], optional = true }
+# smoltcp = { version = "0.8.0", default-features = false, features = ["alloc", "log", "proto-ipv4", "proto-ipv6", "socket-udp", "socket-tcp", "socket-raw"], optional = true }
 
 
 

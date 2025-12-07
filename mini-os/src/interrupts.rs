@@ -3,6 +3,9 @@ use x86_64::registers::control::Cr2;
 use lazy_static::lazy_static;
 use crate::keyboard::keyboard_interrupt_handler;
 use crate::vga_buffer::WRITER;
+use alloc::format;
+
+pub mod apic;
 
 lazy_static! {
     static ref IDT: InterruptDescriptorTable = {
@@ -12,6 +15,8 @@ lazy_static! {
         unsafe {
             idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
             idt.page_fault.set_handler_fn(page_fault_handler);
+            idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
+            idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         }
         
         idt
@@ -20,6 +25,11 @@ lazy_static! {
 
 pub fn init_idt() {
     IDT.load();
+}
+
+extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::scheduler::SCHEDULER.tick();
+    crate::interrupts::apic::signal_eoi();
 }
 
 extern "x86-interrupt" fn general_protection_fault_handler(

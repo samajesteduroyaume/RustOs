@@ -101,13 +101,19 @@ impl MemoryIsolation {
             user_heap_size,
         }
     }
+
+    /// Vérifie si une adresse est mappée dans l'espace utilisateur
+    pub fn is_mapped_address(&self, addr: VirtAddr) -> bool {
+        // TODO: Implémenter la vérification de la table des pages
+        self.user_space.is_valid_address(addr)
+    }
     
     /// Valide un accès mémoire depuis Ring 3
     pub fn validate_access(&self, addr: VirtAddr, size: usize, write: bool) -> Result<(), &'static str> {
         let end_addr = addr + (size as u64);
         
         // Vérifier que l'accès est dans l'espace utilisateur
-        if !self.user_space.is_valid_address(addr) || !self.user_space.is_valid_address(end_addr - 1) {
+        if !self.user_space.is_valid_address(addr) || !self.is_mapped_address(end_addr - 1u64) {
             return Err("Access outside user address space");
         }
         

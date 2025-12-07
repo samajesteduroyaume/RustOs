@@ -49,7 +49,7 @@ use alloc::vec::Vec;
 use alloc::string::ToString;
 use mini_os::memory;
 use mini_os::process::{self, ProcessManager, test_process};
-use mini_os::scheduler::{self, Scheduler, SchedulerPolicy};
+use mini_os::scheduler::{self, Scheduler};
 use mini_os::syscall;
 use mini_os::fs;
 
@@ -151,20 +151,18 @@ pub extern "C" fn _start(multiboot_address: usize) -> ! {
     }
 
     // Initialiser le gestionnaire de processus
-    let mut process_manager = ProcessManager::new();
-    
-    // Créer le processus initial
-    match process_manager.create_process("init", init_process, process::ProcessPriority::Normal) {
-        Ok(pid) => WRITER.lock().write_string(&format!("Processus init créé avec PID: {}\n", pid)),
-        Err(e) => WRITER.lock().write_string(&format!("Erreur création processus: {}\n", e)),
+    // Note: Utilisation de l'instance globale
+    {
+        let mut process_manager = process::PROCESS_MANAGER.lock();
+        
+        // Créer le processus initial
+        match process_manager.create_process("init", init_process, process::ProcessPriority::Normal) {
+            Ok(pid) => WRITER.lock().write_string(&format!("Processus init créé avec PID: {}\n", pid)),
+            Err(e) => WRITER.lock().write_string(&format!("Erreur création processus: {}\n", e)),
+        }
     }
     
-    // Initialiser le planificateur
-    let process_manager = Arc::new(Mutex::new(process_manager));
-    let mut scheduler = Scheduler::new(process_manager.clone(), SchedulerPolicy::RoundRobin);
-    scheduler.set_quantum(100); // 100 ticks par processus
-    
-    WRITER.lock().write_string("Planificateur initialisé\n");
+    WRITER.lock().write_string("Planificateur initialisé (Global)\n");
     
     // Initialiser le gestionnaire de périphériques
     WRITER.lock().write_string("Initialisation du gestionnaire de périphériques...\n");
@@ -188,10 +186,13 @@ pub extern "C" fn _start(multiboot_address: usize) -> ! {
     
     drop(device_manager); // Libérer le verrou
     
+    // ACPI & SMP Init
+    mini_os::smp::init();
+
     WRITER.lock().write_string("Démarrage du multitâche...\n");
     
     // Démarrer le planificateur (cette fonction ne retourne jamais)
-    scheduler.run();
+    mini_os::scheduler::SCHEDULER.run();
 }
 
 #[panic_handler]

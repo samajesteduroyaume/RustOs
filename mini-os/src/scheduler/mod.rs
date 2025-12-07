@@ -1,107 +1,134 @@
 use alloc::sync::Arc;
 use spin::Mutex;
-use crate::process::{Process, ProcessManager};
+use crate::process::{Thread, ProcessManager}; // ProcessManager peut être utile pour debug ou autre
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::arch::asm;
 
 pub mod cfs;
 pub use cfs::{CFSScheduler, CFSRunqueue};
 
-pub mod policy;
-pub use policy::{SchedulingPolicy, PolicyStats, CFSPolicy, RoundRobinPolicy};
+// pub mod policy;
+// pub use policy::{SchedulingPolicy, PolicyStats, CFSPolicy, RoundRobinPolicy}; // On simplifie pour l'instant
 
-pub mod config;
-pub use config::{SchedulerConfig, SchedulerPolicyType, SCHEDULER_CONFIG, switch_scheduler_policy, get_current_policy};
-
-/// Algorithme de planification
-#[derive(Debug, Clone, Copy)]
-pub enum SchedulerPolicy {
-    /// Tourniquet (Round Robin)
-    RoundRobin,
-    /// Par priorité
-    Priority,
-    /// Premier arrivé, premier servi
-    Fifo,
-}
+// pub mod config;
+// pub use config::{SchedulerConfig, SchedulerPolicyType, SCHEDULER_CONFIG, switch_scheduler_policy, get_current_policy};
 
 /// Planificateur de tâches
 pub struct Scheduler {
-    /// Gestionnaire de processus
-    process_manager: Arc<Mutex<ProcessManager>>,
-    /// Politique de planification
-    policy: SchedulerPolicy,
-    /// Compteur de ticks
-    tick_count: AtomicUsize,
-    /// Quantum (nombre de ticks par processus)
-    quantum: usize,
+    cfs: Mutex<CFSScheduler>,
 }
 
 impl Scheduler {
     /// Crée un nouveau planificateur
-    pub fn new(process_manager: Arc<Mutex<ProcessManager>>, policy: SchedulerPolicy) -> Self {
+    pub fn new() -> Self {
         Self {
-            process_manager,
-            policy,
-            tick_count: AtomicUsize::new(0),
-            quantum: 10, // Valeur par défaut
+            cfs: Mutex::new(CFSScheduler::new()),
         }
     }
     
-    /// Définit le quantum
-    pub fn set_quantum(&mut self, quantum: usize) {
-        self.quantum = quantum;
+    /// Ajoute un thread au planificateur
+    pub fn add_thread(&self, thread: Arc<Mutex<Thread>>) {
+        self.cfs.lock().add_thread(thread);
     }
-    
+
     /// Appelé à chaque tick d'horloge
     pub fn tick(&self) {
-        let tick = self.tick_count.fetch_add(1, Ordering::SeqCst) + 1;
-        
-        // Vérifier si on doit effectuer un changement de contexte
-        if tick % self.quantum == 0 {
-            self.schedule();
+        // Update vruntime of current thread
+        if let Some(current) = self.current_thread() {
+            let mut th = current.lock();
+            th.update_vruntime(1);
+            drop(th);
         }
+        
+        // In a real OS, we would check quantum in PerCpuData and trigger schedule if needed.
+        // For now, we rely on the loop in run() or interrupt to call schedule.
     }
     
-    /// Sélectionne le prochain processus à exécuter
-    pub fn schedule(&self) -> Option<Arc<Mutex<Process>>> {
-        let mut pm = self.process_manager.lock();
+    /// Sélectionne le prochain thread à exécuter
+    pub fn schedule(&self) -> Option<Arc<Mutex<Thread>>> {
+        let current = self.current_thread();
         
-        match self.policy {
-            SchedulerPolicy::RoundRobin => {
-                // Implémentation simple du round-robin
-                if let Some(next_process) = pm.schedule() {
-                    // Sauvegarder le contexte du processus actuel
-                    if let Some(current_pid) = pm.current_pid() {
-                        if let Some(proc) = pm.processes().iter().find(|p| p.lock().pid == current_pid) {
-                            proc.lock().save_context();
-                        }
-                    }
-                    
-                    // Restaurer le contexte du prochain processus
-                    next_process.lock().restore_context();
-                    Some(next_process)
-                } else {
-                    None
-                }
-            }
-            _ => {
-                // TODO: Implémenter d'autres algorithmes de planification
-                None
-            }
-        }
+        // Acquire lock on Runqueue
+        let mut cfs = self.cfs.lock();
+        let next = cfs.schedule(current);
+        drop(cfs);
+        
+        // Update Per-CPU current thread
+        crate::smp::percpu::set_current_thread(next.clone());
+        
+        next
     }
     
     /// Démarre le planificateur
     pub fn run(&self) -> ! {
         loop {
-            if let Some(process) = self.schedule() {
-                // Le contexte sera restauré par schedule()
-                drop(process); // Libérer le verrou avant de dormir
-                unsafe { asm!("hlt") }; // Attendre la prochaine interruption
-            } else {
-                // Aucun processus à exécuter, attendre une interruption
+            // Scheduling loop
+            if let Some(thread) = self.schedule() {
+                // Simuler context switch
+                let cr3 = thread.lock().context.cr3;
+                if cr3 != 0 {
+                    // Switch CR3 si nécessaire
+                }
+                drop(thread);
+            }
+            unsafe { asm!("hlt") };
+        }
+    }
+    
+    /// Bloque le thread courant
+    pub fn block_current_thread(&self, reason: crate::process::ThreadState) {
+        if let Some(current) = self.current_thread() {
+            {
+                let mut thread = current.lock();
+                thread.state = reason; 
+            }
+            
+            // On force un reschedule immédiat pour passer la main
+            // Dans un vrai OS, on appellerait schedule() puis context_switch
+            self.schedule();
+            
+            // Attendre d'être réveillé
+            loop {
                 unsafe { asm!("hlt") };
+                // Si on a été reprogrammé, c'est qu'on est au moins Ready/Running
+                if current.lock().state == crate::process::ThreadState::Running {
+                    break;
+                }
+                // Si on est toujours Blocked, on re-schedule un autre thread
+                // self.schedule(); 
+                // Attention: Si on est bloqué, schedule() ne nous choisira PAS.
+                // Donc on doit juste attendre.
             }
         }
     }
+
+    /// Réveille un thread
+    pub fn wake_thread(&self, tid: u64) {
+        if let Some(thread) = crate::process::get_thread_by_tid(tid) {
+            let mut t = thread.lock();
+            if t.state == crate::process::ThreadState::Blocked {
+                t.state = crate::process::ThreadState::Ready;
+                drop(t);
+                // On réinsère dans la runqueue
+                self.add_thread(thread);
+            }
+        }
+    }
+    
+    /// Retourne le thread courant (Per-CPU)
+    pub fn current_thread(&self) -> Option<Arc<Mutex<Thread>>> {
+        crate::smp::percpu::get_current_thread()
+    }
+}
+
+// Instance globale du scheduler
+use lazy_static::lazy_static;
+
+lazy_static! {
+    pub static ref SCHEDULER: Scheduler = Scheduler::new();
+}
+
+/// Helper pour obtenir le thread courant
+pub fn current_thread() -> Option<Arc<Mutex<Thread>>> {
+    SCHEDULER.current_thread()
 }

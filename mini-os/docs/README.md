@@ -36,6 +36,7 @@ docs/
 ├── RING3_SUMMARY.md             # Résumé du projet
 ├── PROJECT_STRUCTURE.md         # Structure du projet
 ├── RING3_TESTING.md             # Guide de test
+├── SMP_POWER.md                 # SMP et Gestion de l'Énergie
 └── SESSION_SUMMARY.md           # Résumé de la session
 ```
 
@@ -87,6 +88,7 @@ docs/
 
 ### Implémentation
 - [RING3_IMPLEMENTATION.md](RING3_IMPLEMENTATION.md) - Détails d'implémentation
+- [SMP_POWER.md](SMP_POWER.md) - SMP et Gestion de l'Énergie
 
 ### Résumés
 - [RING3_SUMMARY.md](RING3_SUMMARY.md) - Résumé du projet

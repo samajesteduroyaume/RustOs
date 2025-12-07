@@ -28,6 +28,13 @@ pub enum SyscallNumber {
     // Memory mapping
     Mmap = 19,
     Munmap = 20,
+    Symlink = 21,
+    Readlink = 22,
+    Chmod = 23,
+    Chown = 24,
+    Chgrp = 25,
+    // Gestion des threads
+    ThreadCreate = 26,
 }
 
 /// Résultat d'un appel système
@@ -43,6 +50,7 @@ pub enum SyscallError {
     InvalidSyscall,
     InvalidArgument,
     NoSuchProcess,
+    NotFound,
     PermissionDenied,
     IoError,
     OutOfMemory,
@@ -78,6 +86,12 @@ impl SyscallHandler {
             x if x == SyscallNumber::ShmCtl as u64 => self.handle_shmctl(args[0] as i32, args[1] as i32),
             x if x == SyscallNumber::Mmap as u64 => self.handle_mmap(args[0], args[1] as usize, args[2] as i32, args[3] as i32, args[4] as i32, args[5]),
             x if x == SyscallNumber::Munmap as u64 => self.handle_munmap(args[0], args[1] as usize),
+            x if x == SyscallNumber::Symlink as u64 => self.handle_symlink(args[0] as *const u8, args[1] as *const u8),
+            x if x == SyscallNumber::Readlink as u64 => self.handle_readlink(args[0] as *const u8, args[1] as *mut u8, args[2] as usize),
+            x if x == SyscallNumber::Chmod as u64 => self.handle_chmod(args[0], args[1] as u16),
+            x if x == SyscallNumber::Chown as u64 => self.handle_chown(args[0], args[1] as u32),
+            x if x == SyscallNumber::Chgrp as u64 => self.handle_chgrp(args[0], args[1] as u32),
+            x if x == SyscallNumber::ThreadCreate as u64 => self.handle_thread_create(args[0]),
             _ => SyscallResult::Error(SyscallError::InvalidSyscall),
         }
     }
@@ -379,5 +393,71 @@ impl SyscallHandler {
             Err(_) => SyscallResult::Error(SyscallError::InvalidArgument),
         }
     }
-
+    
+    fn handle_symlink(&self, _target_ptr: *const u8, _link_ptr: *const u8) -> SyscallResult {
+        use crate::fs::SYMLINK_MANAGER;
+        use alloc::string::String;
+        let target_path = String::from("/target");
+        let link_path = String::from("/link");
+        match SYMLINK_MANAGER.lock().create_symlink(link_path, target_path, 1000, 1000) {
+            Ok(inode) => SyscallResult::Success(inode),
+            Err(_) => SyscallResult::Error(SyscallError::InvalidArgument),
+        }
+    }
+    
+    fn handle_readlink(&self, _link_ptr: *const u8, _buf_ptr: *mut u8, _buf_size: usize) -> SyscallResult {
+        use crate::fs::SYMLINK_MANAGER;
+        use alloc::string::String;
+        let link_path = String::from("/link");
+        match SYMLINK_MANAGER.lock().readlink(&link_path) {
+            Ok(target) => SyscallResult::Success(target.len() as u64),
+            Err(_) => SyscallResult::Error(SyscallError::NotFound),
+        }
+    }
+    
+    fn handle_chmod(&self, inode: u64, mode: u16) -> SyscallResult {
+        use crate::fs::PERMISSION_MANAGER;
+        let caller_uid = 1000; // TODO: Récupérer l'UID du processus actuel
+        match PERMISSION_MANAGER.lock().chmod(inode, mode, caller_uid) {
+            Ok(_) => SyscallResult::Success(0),
+            Err(_) => SyscallResult::Error(SyscallError::PermissionDenied),
+        }
+    }
+    
+    fn handle_chown(&self, inode: u64, uid: u32) -> SyscallResult {
+        use crate::fs::PERMISSION_MANAGER;
+        let caller_uid = 0; // TODO: Récupérer l'UID du processus actuel
+        match PERMISSION_MANAGER.lock().chown(inode, uid, caller_uid) {
+            Ok(_) => SyscallResult::Success(0),
+            Err(_) => SyscallResult::Error(SyscallError::PermissionDenied),
+        }
+    }
+    
+    fn handle_chgrp(&self, inode: u64, gid: u32) -> SyscallResult {
+        use crate::fs::PERMISSION_MANAGER;
+        let caller_uid = 1000; // TODO: Récupérer l'UID du processus actuel
+        match PERMISSION_MANAGER.lock().chgrp(inode, gid, caller_uid) {
+            Ok(_) => SyscallResult::Success(0),
+            Err(_) => SyscallResult::Error(SyscallError::PermissionDenied),
+        }
+    }
+    
+    /// Crée un nouveau thread dans le processus actuel
+    /// args[0] = entry_point
+    fn handle_thread_create(&self, entry_point: u64) -> SyscallResult {
+        use crate::process::{PROCESS_MANAGER, current_process};
+        
+        // Obtenir le PID du processus actuel
+        let current_pid = match current_process() {
+            Some(p) => p.lock().pid,
+            None => return SyscallResult::Error(SyscallError::NoSuchProcess),
+        };
+        
+        // Créer le thread via le ProcessManager
+        let mut pm = PROCESS_MANAGER.lock();
+        match pm.create_thread(current_pid, entry_point) {
+            Ok(tid) => SyscallResult::Success(tid),
+            Err(_) => SyscallResult::Error(SyscallError::OutOfMemory), // Ou autre erreur appropriée
+        }
+    }
 }

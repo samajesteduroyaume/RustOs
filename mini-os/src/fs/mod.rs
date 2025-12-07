@@ -4,6 +4,14 @@ pub mod vfs_inode;
 pub mod vfs_dentry;
 pub mod vfs_mount;
 pub mod ramfs;
+pub mod symlink;
+pub mod permissions;
+pub mod acl;
+pub mod journal;
+pub mod sparse;
+pub mod ext2_extent;
+pub mod fat32_cache;
+pub mod cache;
 
 pub use fd::{FileDescriptor, FileDescriptorTable, FileDescriptorManager, OpenMode, FD_MANAGER};
 pub use vfs_core::*;
@@ -11,6 +19,14 @@ pub use vfs_inode::{Inode, InodeCache, INODE_CACHE, get_or_create_inode, put_ino
 pub use vfs_dentry::{Dentry, DentryCache, DENTRY_CACHE, path_lookup as vfs_path_lookup, create_root_dentry};
 pub use vfs_mount::{MountPoint, MountFlags, MountManager, MOUNT_MANAGER, mount_root, mount_fs, unmount_fs};
 pub use ramfs::RamFileSystemRef;
+pub use symlink::{SYMLINK_MANAGER, SymlinkManager, SymlinkError, LinkType};
+pub use permissions::{PERMISSION_MANAGER, PermissionManager, Permissions, PermissionError};
+pub use acl::{ACL_MANAGER, AclManager, Acl, AclEntry, AclEntryType, AclPermissions, PermissionType};
+pub use journal::{JOURNAL, Journal, JournalMode, Transaction, JournalStats};
+pub use sparse::{SPARSE_FILE_MANAGER, SparseFileManager, SparseFile, SparseFileStats};
+pub use ext2_extent::{EXT2_EXTENT_MANAGER, Ext2ExtentManager, Extent, ExtentTree};
+pub use fat32_cache::{FAT32_CACHE, Fat32CacheManager, FatCache, FatCacheStats};
+pub use cache::{BUFFER_CACHE, BufferCache, BufferCacheStats};
 
 use alloc::string::String;
 use alloc::vec::Vec;

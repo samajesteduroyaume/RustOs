@@ -129,7 +129,7 @@ pub struct FAT32<D: Disk> {
 
 impl<D: Disk> FAT32<D> {
     /// Crée une nouvelle instance de FAT32
-    pub fn new(mut disk: D, disk_offset: u64) -> Result<Self, FsError> {
+    pub fn new(disk: D, disk_offset: u64) -> Result<Self, FsError> {
         // Lire le secteur de démarrage (secteur 0)
         let mut bpb = BiosParameterBlock {
             jmp_boot: [0; 3],
