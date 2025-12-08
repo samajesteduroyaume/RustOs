@@ -21,3 +21,4 @@ mini-os/isodir/
 **/*.iso
 **/target/
 **/Cargo.lock
+mini-os/rustos_multiboot2.img
