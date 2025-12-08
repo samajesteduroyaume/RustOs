@@ -17,6 +17,7 @@ mini-os/isodir/
 
 # Fichiers binaires volumineux
 **/*.img
+!mini-os/rustos_multiboot2.img  # Géré par Git LFS
 **/*.iso
 **/target/
 **/Cargo.lock
