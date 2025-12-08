@@ -14,3 +14,9 @@ mini-os/isodir/
 # Outils IDE
 .vscode/
 .idea/
+
+# Fichiers binaires volumineux
+**/*.img
+**/*.iso
+**/target/
+**/Cargo.lock
