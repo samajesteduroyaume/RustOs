@@ -4,7 +4,7 @@
 extern crate alloc;
 use mini_os::{
     net::{
-        socket::{SocketTable, SocketDomain, SocketType, SocketAddr, SOCKET_TABLE},
+        socket::{SocketDomain, SocketType, SocketAddr, SOCKET_TABLE},
         arp::Ipv4Address,
     },
 };

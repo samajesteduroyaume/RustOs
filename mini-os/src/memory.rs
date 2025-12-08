@@ -1,4 +1,4 @@
-pub mod vm;
+// pub mod vm; // Disabled - depends on Limine
 pub mod slab;
 pub mod hybrid;
 pub mod shm;

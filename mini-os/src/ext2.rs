@@ -668,7 +668,7 @@ impl<D: Disk> Ext2<D> {
 // impl<D: Disk> crate::fs::FileSystem for Ext2<D> { // Commented out as currently FileSystem trait is not fully unified or defined in fs::mod.rs exposed way
 // For now, let's just make it standalone or use simplified methods
 impl<D: Disk> Ext2<D> {
-    fn read_dir(&self, path: &str) -> Result<Vec<String>, FsError> {
+    pub fn read_dir(&self, path: &str) -> Result<Vec<String>, FsError> {
         let inode = if path.is_empty() || path == "/" {
             self.get_inode(EXT2_ROOT_INO)
         } else {
@@ -717,7 +717,7 @@ impl<D: Disk> Ext2<D> {
         Ok(entries)
     }
     
-    fn read_file(&self, path: &str) -> Result<Vec<u8>, FsError> {
+    pub fn read_file(&self, path: &str) -> Result<Vec<u8>, FsError> {
         let inode = if path.is_empty() || path == "/" {
             return Err(FsError::IoError);
         } else {
@@ -741,7 +741,7 @@ impl<D: Disk> Ext2<D> {
     // Les méthodes suivantes sont des implémentations de base qui retournent des erreurs
     // car l'écriture nécessite une implémentation plus complexe avec mise à jour des bitmaps, etc.
     
-    fn write_file(&mut self, path: &str, content: &[u8]) -> Result<(), FsError> {
+    pub fn write_file(&mut self, path: &str, content: &[u8]) -> Result<(), FsError> {
         if path.is_empty() || path == "/" {
             return Err(FsError::IoError);
         }
@@ -828,7 +828,7 @@ impl<D: Disk> Ext2<D> {
         Ok(())
     }
     
-    fn create_file(&mut self, path: &str, content: &[u8]) -> Result<(), FsError> {
+    pub fn create_file(&mut self, path: &str, content: &[u8]) -> Result<(), FsError> {
         if self.exists(path) {
             return Err(FsError::AlreadyExists);
         }
@@ -836,7 +836,7 @@ impl<D: Disk> Ext2<D> {
         self.write_file(path, content)
     }
     
-    fn create_dir(&mut self, path: &str) -> Result<(), FsError> {
+    pub fn create_dir(&mut self, path: &str) -> Result<(), FsError> {
         if path.is_empty() || path == "/" {
             return Err(FsError::AlreadyExists);
         }
@@ -972,9 +972,13 @@ impl<D: Disk> Ext2<D> {
         Ok(())
     }
     
-    fn remove_file(&mut self, _path: &str) -> Result<(), FsError> {
+    pub fn remove_file(&mut self, _path: &str) -> Result<(), FsError> {
         // Implémentation simplifiée - retourne une erreur
         Err(FsError::IoError)
+    }
+    
+    pub fn delete_file(&mut self, path: &str) -> Result<(), FsError> {
+        self.remove_file(path)
     }
     
     fn remove_dir(&mut self, _path: &str) -> Result<(), FsError> {

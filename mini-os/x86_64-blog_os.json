@@ -9,9 +9,12 @@
   "executables": true,
   "disable-redzone": true,
   "linker": "rust-lld",
+  "relocation-model": "static",
   "pre-link-args": {
     "ld.lld": [
-      "-Tlinker.ld"
+      "-Tlinker.ld",
+      "--no-dynamic-linker",
+      "-static"
     ]
   }
 }

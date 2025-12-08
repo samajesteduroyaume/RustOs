@@ -64,7 +64,7 @@ pub fn init_vfs() -> VfsResult<()> {
 }
 
 /// Helper: Lookup path using global root
-fn path_lookup(path: &str) -> VfsResult<Arc<Mutex<Dentry>>> {
+pub fn path_lookup(path: &str) -> VfsResult<Arc<Mutex<Dentry>>> {
     let root = ROOT_DENTRY.lock().as_ref().ok_or(VfsError::IoError)?.clone();
     vfs_path_lookup(path, root)
 }

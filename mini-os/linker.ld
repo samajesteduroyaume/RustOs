@@ -1,20 +1,43 @@
 OUTPUT_FORMAT("elf64-x86-64")
+OUTPUT_ARCH(i386:x86-64)
 ENTRY(_start)
 
 SECTIONS
 {
-  . = 0x100000; /* charge le noyau à 1 MiB */
-
-  .text : {
+  /* Start at 1MB */
+  . = 1M;
+  
+  /* Multiboot2 header - MUST be in a LOAD segment */
+  .boot : ALIGN(8) {
+    KEEP(*(.multiboot_header))
     *(.text._start)
+  }
+
+  /* Main text section */
+  .text : ALIGN(4K) {
     *(.text*)
   }
 
-  .trampoline : {
-    KEEP(*(.trampoline))
+  /* Read-only data */
+  .rodata : ALIGN(4K) {
+    *(.rodata*)
   }
 
-  .rodata : { *(.rodata*) }
-  .data : { *(.data*) }
-  .bss : { *(.bss*) }
+  /* Data */
+  .data : ALIGN(4K) {
+    *(.data*)
+  }
+
+  /* BSS */
+  .bss : ALIGN(4K) {
+    *(.bss*)
+    *(COMMON)
+  }
+
+  /* Discard unwanted sections */
+  /DISCARD/ : {
+    *(.comment)
+    *(.eh_frame)
+    *(.note*)
+  }
 }

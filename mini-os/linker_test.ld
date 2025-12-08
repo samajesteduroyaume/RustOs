@@ -2,36 +2,35 @@
 
 ENTRY(_start)
 
-SECTIONS {
-    /* Charger le kernel à 1MB (adresse standard pour multiboot) */
-    . = 1M;
+SECTIONS
+{
+  . = 0x100000; /* charge le noyau à 1 MiB */
 
-    /* Section multiboot2 header - DOIT être au début */
-    .multiboot2 ALIGN(8) : {
-        KEEP(*(.multiboot2))
-    }
+  . = ALIGN(0x1000);
+  /* Limine requests section */
+  .requests : {
+    KEEP(*(.requests_start_marker))
+    KEEP(*(.requests))
+    KEEP(*(.requests_end_marker))
+  }
 
-    /* Section text (code) */
-    .text ALIGN(4K) : {
-        *(.text .text.*)
-    }
+  .text : {
+    *(.text._start)
+    *(.text*)
+  }
+  . = ALIGN(0x1000);
 
-    /* Section rodata (données en lecture seule) */
-    .rodata ALIGN(4K) : {
-        *(.rodata .rodata.*)
-    }
+  . = ALIGN(0x1000);
+  .trampoline : {
+    KEEP(*(.trampoline))
+  }
 
-    /* Section data (données initialisées) */
-    .data ALIGN(4K) : {
-        *(.data .data.*)
-    }
+  . = ALIGN(0x1000);
+  .rodata : { *(.rodata*) }
 
-    /* Section bss (données non initialisées) */
-    .bss ALIGN(4K) : {
-        *(.bss .bss.*)
-        *(COMMON)
-    }
+  . = ALIGN(0x1000);
+  .data : { *(.data*) }
 
-    /* Symboles de fin */
-    _end = .;
+  . = ALIGN(0x1000);
+  .bss : { *(.bss*) }
 }

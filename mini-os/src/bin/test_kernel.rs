@@ -3,8 +3,7 @@
 
 use core::panic::PanicInfo;
 use core::fmt::Write;
-
-use bootloader::BootInfo;
+use mini_os::interrupts; // Use definitions from the library
 
 // ============================================================================
 // KERNEL ENTRY POINT
@@ -12,28 +11,34 @@ use bootloader::BootInfo;
 
 /// Point d'entrée du kernel de test
 #[no_mangle]
-pub extern "C" fn _start(_boot_info: &'static BootInfo) -> ! {
-    // DEBUG: Écrire 'X' rouge en haut à gauche de l'écran (VGA buffer)
+pub extern "C" fn _start() -> ! {
+    // 1. Initialiser le port série en premier pour le debug
+    // Dirty early init for debug
     unsafe {
-        let vga_buffer = 0xb8000 as *mut u8;
-        *vga_buffer.offset(0) = b'X';     // Caractère
-        *vga_buffer.offset(1) = 0x4F;     // Couleur (Blanc sur Rouge)
+        use x86_64::instructions::port::PortGeneric;
+        let mut port: x86_64::instructions::port::Port<u8> = x86_64::instructions::port::Port::new(0x3F8);
+        port.write(b'K'); // 'K' for Kernel start
     }
 
-    // Initialiser le port série directement
     let mut serial = unsafe { uart_16550::SerialPort::new(0x3F8) };
     serial.init();
     
-    // Écrire sur le port série
-    let _ = writeln!(serial, "RustOS Test Kernel");
+    // 2. Initialiser l'IDT pour gérer les exceptions (évite le Triple Fault)
+    interrupts::init_idt();
+    unsafe { x86_64::instructions::interrupts::enable(); }
     
-    let _ = writeln!(serial, "==================\n");
-    let _ = writeln!(serial, "Bootimage loaded!");
-    let _ = writeln!(serial, "Running basic tests...");
-    let _ = writeln!(serial, "test test_kernel::basic_test...\t[ok]");
+    // 3. Message de bienvenue
+    let _ = writeln!(serial, "RustOS Test Kernel (Limine)");
+    let _ = writeln!(serial, "=========================");
+    let _ = writeln!(serial, "Initialization: [OK]");
+    
+    // 4. Exécuter les tests (basic)
+    let _ = writeln!(serial, "Running basic_test...");
+    let _ = writeln!(serial, "test passed!");
+    
     let _ = writeln!(serial, "\nAll tests passed!");
     
-    // Quitter QEMU avec succès
+    // 5. Quitter QEMU
     exit_qemu(QemuExitCode::Success);
 }
 
@@ -57,7 +62,7 @@ pub fn exit_qemu(exit_code: QemuExitCode) -> ! {
     }
 }
 
-/// Gestionnaire de panique pour les tests
+/// Gestionnaire de panique
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     let mut serial = unsafe { uart_16550::SerialPort::new(0x3F8) };

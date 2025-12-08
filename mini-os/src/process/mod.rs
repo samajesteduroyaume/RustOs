@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use alloc::format;
 use spin::Mutex;
 use core::arch::asm;
-use crate::memory::vm::{VMManager, VM_MANAGER};
+// use crate::memory::vm::{VMManager, VM_MANAGER}; // Disabled - depends on Limine
 
 pub mod elf;
 use self::elf::{ElfFile, PT_LOAD, PF_X, PF_W, PF_R};
@@ -97,11 +97,13 @@ pub struct Process {
 impl Process {
     /// Crée un nouveau processus avec un thread principal
     pub fn new(pid: u64, name: &str, _entry_point: fn() -> !, priority: ProcessPriority) -> Result<Self, &'static str> {
-        let address_space_id = VM_MANAGER
-            .lock()
-            .as_mut()
-            .ok_or("Gestionnaire de mémoire virtuelle non initialisé")?
-            .create_process_space();
+        // VM disabled - using placeholder
+        let address_space_id = 0;
+        // let address_space_id = VM_MANAGER
+        //     .lock()
+        //     .as_mut()
+        //     .ok_or("Gestionnaire de mémoire virtuelle non initialisé")?
+        //     .create_process_space();
             
         let mut process = Self {
             pid,
@@ -154,11 +156,13 @@ impl Process {
     /// Duplique le processus (fork)
     /// Note: Cela duplique l'espace d'adressage et on suppose qu'on fork depuis un thread spécifique qui deviendra le main thread du fils
     pub fn fork(&self, current_thread: &Thread, new_pid: u64) -> Result<Self, &'static str> {
-        let address_space_id = VM_MANAGER
-            .lock()
-            .as_mut()
-            .ok_or("Gestionnaire de mémoire virtuelle non initialisé")?
-            .create_process_space();
+        // VM disabled - using placeholder
+        let address_space_id = 0;
+        // let address_space_id = VM_MANAGER
+        //     .lock()
+        //     .as_mut()
+        //     .ok_or("Gestionnaire de mémoire virtuelle non initialisé")?
+        //     .create_process_space();
         
         // Marquer pages CoW (TODO)
         let cow_pages = Vec::new();
@@ -227,8 +231,7 @@ pub struct ProcessManager {
     processes: Vec<Arc<Mutex<Process>>>,
     /// Compteur pour générer des PID uniques
     next_pid: u64,
-    /// Gestionnaire de mémoire virtuelle
-    vm_manager: Option<&'static Mutex<Option<VMManager>>>,
+    // VM disabled - depends on Limine
 }
 
 impl ProcessManager {
@@ -237,7 +240,6 @@ impl ProcessManager {
         Self {
             processes: Vec::new(),
             next_pid: 1, // Le PID 0 est réservé pour le processus idle (ou kernel)
-            vm_manager: Some(&VM_MANAGER),
         }
     }
     
@@ -253,6 +255,9 @@ impl ProcessManager {
         
         let process = Arc::new(Mutex::new(process_struct));
         self.processes.push(process);
+        
+        // Initialiser la table des descripteurs de fichiers
+        crate::fs::FD_MANAGER.lock().create_table(pid).unwrap();
         
         // Ajouter le thread au scheduler
         crate::scheduler::SCHEDULER.add_thread(main_thread);
@@ -298,10 +303,48 @@ impl ProcessManager {
         let process = Arc::new(Mutex::new(process));
         self.processes.push(process);
         
+        // Initialiser la table des descripteurs de fichiers
+        crate::fs::FD_MANAGER.lock().create_table(pid).unwrap();
+        
         // Ajouter le thread au scheduler
         crate::scheduler::SCHEDULER.add_thread(main_thread);
         
         Ok(pid)
+    }
+
+    /// Remplace l'image du processus actuel par un nouvel exécutable (exec)
+    pub fn exec_process(&mut self, current_tid: u64, path: &str) -> Result<u64, String> {
+        // 1. Lire le fichier ELF
+        let content = crate::fs::vfs_read_file(path)
+            .map_err(|_| String::from("File not found"))?;
+            
+        let elf = ElfFile::new(&content).map_err(|e| String::from(e))?;
+        if let Err(e) = elf.header.validate() {
+            return Err(String::from(e));
+        }
+        
+        // 2. Trouver le process
+        let process_arc = self.processes.iter().find(|p| {
+            p.lock().threads.iter().any(|t| t.lock().tid == current_tid)
+        }).ok_or(String::from("Process not found"))?.clone();
+        
+        let mut process = process_arc.lock();
+        process.name = String::from(path);
+        
+        // 3. Réinitialiser le thread
+        // Simplification: on assume que c'est le seul thread ou on modifie juste celui-ci
+        let thread_arc = process.threads.iter()
+            .find(|t| t.lock().tid == current_tid)
+            .unwrap()
+            .clone();
+            
+        {
+            let mut thread = thread_arc.lock();
+            thread.context.rip = elf.header.e_entry;
+            // TODO: Reset stack, load segments
+        }
+        
+        Ok(0)
     }
 
     /// Duplique le processus actuel (fork)
@@ -367,6 +410,19 @@ impl ProcessManager {
         crate::scheduler::SCHEDULER.add_thread(thread);
         
         Ok(tid)
+    }
+
+    /// Termine un processus
+    pub fn terminate_process(&mut self, target_pid: u64, _status: i32) -> Result<(), &'static str> {
+        let process_lock = self.processes.iter()
+            .find(|p| p.lock().pid == target_pid)
+            .ok_or("Process not found")?
+            .clone();
+            
+        let mut process = process_lock.lock();
+        process.state = ProcessState::Terminated;
+        
+        Ok(())
     }
 }
 

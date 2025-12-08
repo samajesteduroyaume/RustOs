@@ -17,6 +17,24 @@ extern crate alloc;
 
 use mini_os::test_runner;
 
+// Multiboot2 header
+mod multiboot2_header {
+    use core::arch::global_asm;
+    global_asm!(
+        ".section .multiboot_header",
+        ".align 8",
+        "multiboot_header_start:",
+        "    .long 0xE85250D6",
+        "    .long 0",
+        "    .long multiboot_header_end - multiboot_header_start",
+        "    .long -(0xE85250D6 + 0 + (multiboot_header_end - multiboot_header_start))",
+        "    .short 0",
+        "    .short 0",
+        "    .long 8",
+        "multiboot_header_end:",
+    );
+}
+
 mod vga_buffer;
 mod interrupts;
 mod keyboard;
@@ -25,7 +43,7 @@ mod mouse;
 mod hardware;
 mod pci;
 mod storage;
-mod ethernet;
+// mod ethernet;
 // mod process; // Use from lib
 // mod scheduler; // Use from lib
 // mod syscall; // Use from lib
@@ -35,7 +53,7 @@ mod shell;
 mod terminal;
 mod libc;
 mod drivers;
-mod network;
+// mod network;
 mod device_manager;
 
 use core::panic::PanicInfo;
@@ -53,20 +71,21 @@ use mini_os::scheduler::{self, Scheduler};
 use mini_os::syscall;
 use mini_os::fs;
 
+// Multiboot2 - pas de requests nécessaires
+
 #[alloc_error_handler]
 fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     panic!("allocation error: {:?}", layout);
 }
 
-/// Point d'entrée du noyau
+/// Point d'entrée du noyau (Multiboot2)
 #[no_mangle]
-pub extern "C" fn _start(multiboot_address: usize) -> ! {
+extern "C" fn _start() -> ! {
     // Initialiser l'écran
-    WRITER.lock().write_string("Mini OS Rust démarré!\n");
+    WRITER.lock().write_string("Mini OS Rust démarré (Multiboot2 + GRUB)!\n");
     
     // Détection du matériel
     hardware::detect_cpu();
-    hardware::detect_memory(multiboot_address);
     hardware::scan_pci();
 
     // Initialiser le tas (heap)
@@ -186,7 +205,8 @@ pub extern "C" fn _start(multiboot_address: usize) -> ! {
     
     drop(device_manager); // Libérer le verrou
     
-    // ACPI & SMP Init
+    // ACPI & SMP Init (optional, disabled by default)
+    #[cfg(feature = "smp")]
     mini_os::smp::init();
 
     WRITER.lock().write_string("Démarrage du multitâche...\n");

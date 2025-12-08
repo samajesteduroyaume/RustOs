@@ -14,6 +14,7 @@ global_asm!(r#"
 .section .trampoline, "awx"
 .global trampoline_start
 .global trampoline_end
+.intel_syntax noprefix
 .code16
 
 trampoline_start:
@@ -25,24 +26,43 @@ trampoline_start:
     mov es, ax
     mov ss, ax
     
-    // 2. Load GDTR
-    // wrapper for lgdt expects 6 bytes (2 limit + 4 base)
-    // defined at bottom
-    lgdt [gdt_desc - trampoline_start + 0x8000]
+    // 2. Fixup GDT Descriptor Base
+    // GDT Base = 0x8000 + (gdt_start - trampoline_start)
+    // Use 32-bit registers for math to supported 32-bit relocations
+    mov eax, 0x8000
+    add eax, offset gdt_start
+    sub eax, offset trampoline_start
+    
+    // Address of gdt_desc
+    mov edi, 0x8000
+    add edi, offset gdt_desc
+    sub edi, offset trampoline_start
+    
+    // Store Base (Low 32 bits) into gdt_desc + 2
+    // di is valid because edi < 64KB
+    mov [di+2], eax
+    
+    // Load GDTR
+    lgdt [di]
     
     // 3. Enable Protected Mode (CR0.PE)
     mov eax, cr0
     or eax, 1
     mov cr0, eax
     
-    // 4. Far Jump to 32-bit code (flush pipeline)
-    // 0x08 is the Code Segment selector in our GDT
-    ljmp $0x08, $(prot_mode - trampoline_start + 0x8000)
+    // 4. Far Jump to 32-bit code via Stack (retf)
+    mov ebx, 0x8000
+    add ebx, offset prot_mode
+    sub ebx, offset trampoline_start
+    
+    push 0x08  // CS
+    push bx    // IP (16-bit from ebx)
+    retf
 
 .code32
 prot_mode:
     // 5. Setup segments for 32-bit
-    mov ax, 0x10 // Data Segment
+    mov ax, 0x10
     mov ds, ax
     mov es, ax
     mov ss, ax
@@ -51,54 +71,64 @@ prot_mode:
     
     // 6. Enable PAE and PGE (CR4)
     mov eax, cr4
-    or eax, 0xA0 // PAE | PGE
+    or eax, 0xA0
     mov cr4, eax
     
     // 7. Load CR3 (PML4)
-    // Value patched at offset (pml4_ptr - trampoline_start)
-    mov eax, [pml4_ptr - trampoline_start + 0x8000]
+    mov esi, 0x8000
+    add esi, offset pml4_ptr
+    sub esi, offset trampoline_start
+    mov eax, [esi]
     mov cr3, eax
     
     // 8. Enable Long Mode (EFER MSR)
     mov ecx, 0xC0000080
     rdmsr
-    or eax, 0x100 // LME
+    or eax, 0x100
     wrmsr
     
     // 9. Enable Paging (CR0)
     mov eax, cr0
-    or eax, 0x80000000 // PG
+    or eax, 0x80000000
     mov cr0, eax
     
-    // 10. Far Jump to 64-bit code
-    // 0x08 is Code Segment (Long Mode) - we reuse same selector index if configured
-    ljmp $0x08, $(long_mode - trampoline_start + 0x8000)
+    // 10. Far Jump to 64-bit via Stack (retf)
+    mov esi, 0x8000
+    add esi, offset long_mode
+    sub esi, offset trampoline_start
+    
+    push 0x08 // CS (32-bit push)
+    push esi  // EIP (32-bit push)
+    retf
 
 .code64
 long_mode:
     // 11. Setup Stack
-    // Value patched
-    mov rsp, [stack_ptr - trampoline_start + 0x8000]
+    mov rsi, 0x8000
+    add rsi, offset stack_ptr
+    sub rsi, offset trampoline_start
+    mov rsp, [rsi]
     
-    // 12. Jump to Rust AP Entry
-    // Value patched
-    mov rax, [entry_ptr - trampoline_start + 0x8000]
+    // 12. Jump to FreeRust AP Entry
+    mov rsi, 0x8000
+    add rsi, offset entry_ptr
+    sub rsi, offset trampoline_start
+    mov rax, [rsi]
     call rax
     
-    // Should not reach
     hlt
 
-// Data Area (aligned)
+// Data Area
 .align 8
 gdt_start:
-    .quad 0x0000000000000000 // Null
-    .quad 0x00209A0000000000 // Code 64-bit (Exec/Read)
-    .quad 0x0000920000000000 // Data 64-bit (Read/Write)
+    .quad 0x0000000000000000
+    .quad 0x00209A0000000000
+    .quad 0x0000920000000000
 gdt_end:
 
 gdt_desc:
     .word gdt_end - gdt_start - 1
-    .long gdt_start - trampoline_start + 0x8000
+    .long 0 // Patched at runtime
 
 .align 8
 .global pml4_ptr
@@ -107,7 +137,7 @@ gdt_desc:
 
 pml4_ptr:
     .long 0
-    .long 0    // Padding for alignment if needed
+    .long 0
 
 stack_ptr:
     .quad 0

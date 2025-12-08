@@ -1,50 +1,52 @@
 #!/bin/bash
-# Script pour créer une ISO bootable
+# Script pour compiler et exécuter RustOS avec QEMU
+# Simplifié pour utiliser directement l'image générée par bootimage
 
 set -e
 
-echo "💿 Création de RustOS ISO"
-echo "========================="
+echo "💿 Compilation et exécution de RustOS"
+echo "=================================="
 
-# Vérifier la présence de grub-pc-bin pour le support BIOS legacy
-if ! dpkg -l | grep -q "grub-pc-bin"; then
-    echo "⚠️  ATTENTION : Le paquet 'grub-pc-bin' est manquant."
-    echo "    L'ISO générée ne sera probablement PAS bootable sur QEMU par défaut (BIOS)."
-    echo "    Elle ne fonctionnera qu'en mode UEFI."
-    echo ""
-    echo "    Pour corriger ce problème, installez le paquet :"
-    echo "    👉 sudo apt-get install grub-pc-bin"
-    echo ""
-    echo "    (Appuyez sur Entrée pour continuer quand même, ou Ctrl+C pour annuler)"
-    read -t 5 || true
-fi
+# Vérifier les dépendances
+REQUIRED_PKGS=("qemu-system-x86")
+for pkg in "${REQUIRED_PKGS[@]}"; do
+    if ! dpkg -l | grep -q "^ii.*$pkg"; then
+        echo "⚠️  Installation du paquet requis: $pkg"
+        sudo apt-get install -y "$pkg"
+    fi
+done
 
-# Utiliser cargo bootimage qui gère correctement le passage 32-bit -> 64-bit
-# contrairement à une ISO GRUB manuelle qui nécessiterait un trampoline assembleur.
+# Nettoyage optionnel (commenté pour la vitesse)
+# echo "🧹 Nettoyage..."
+# cargo clean
 
-echo "📦 Création de l'image disque bootable (RustOS)..."
+# Compilation avec cargo bootimage
+echo "🛠️  Compilation avec bootimage..."
+# Ceci génère target/x86_64-test-kernel/debug/bootimage-test-kernel.bin
+# Cette image contient déjà un bootloader (créé par la crate bootloader) et le kernel.
+cargo bootimage --bin test-kernel --target x86_64-test-kernel.json -Z build-std=core,alloc
 
-# 1. Compiler avec bootimage
-cargo bootimage --bin test-kernel --release --target x86_64-test-kernel.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem
+# Chemin de l'image disque bootable générée
+BOOT_IMAGE="target/x86_64-test-kernel/debug/bootimage-test-kernel.bin"
 
-# 2. Récupérer l'image générée
-SOURCE_IMG="target/x86_64-test-kernel/release/bootimage-test-kernel.bin"
-DEST_IMG="rustos.img"
-
-if [ ! -f "$SOURCE_IMG" ]; then
-    echo "❌ Erreur : Image bootimage non générée."
+if [ ! -f "$BOOT_IMAGE" ]; then
+    echo "❌ Erreur: L'image $BOOT_IMAGE n'a pas été créée."
     exit 1
 fi
 
-cp "$SOURCE_IMG" "$DEST_IMG"
+echo "✅ Image disque trouvée: $BOOT_IMAGE"
 
-echo "✅ Image bootable créée : $DEST_IMG"
-echo "   (Format : Image Disque RAW / HDD)"
-echo ""
+# Lancer QEMU avec l'image disque générée
 echo "🚀 Lancement de QEMU..."
-
-# 3. Lancer QEMU en mode Disque Dur (pas CDROM)
+# On utilise l'image fournie par bootimage directement
 qemu-system-x86_64 \
-    -drive format=raw,file="$DEST_IMG" \
-    -serial mon:stdio \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04
+    -drive format=raw,file="$BOOT_IMAGE" \
+    -m 2G \
+    -serial stdio \
+    -display gtk \
+    -vga std \
+    -machine q35 \
+    -smp 2 \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -no-reboot \
+    -no-shutdown

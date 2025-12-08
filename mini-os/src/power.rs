@@ -1,8 +1,17 @@
 use x86_64::instructions::port::Port;
+#[cfg(feature = "smp")]
 use crate::acpi::{self, fadt::Fadt};
 
+#[cfg(feature = "smp")]
+type FadtType = Fadt;
+#[cfg(not(feature = "smp"))]
+type FadtType = ();
+
 pub struct PowerManager {
-    fadt: Option<Fadt>,
+    #[cfg(feature = "smp")]
+    fadt: Option<FadtType>,
+    #[cfg(not(feature = "smp"))]
+    fadt: Option<FadtType>,
 }
 
 impl PowerManager {
@@ -13,14 +22,22 @@ impl PowerManager {
     }
 
     fn init(&mut self) {
-        if let Some(rsdp) = acpi::find_rsdp() {
-            if let Some(fadt) = acpi::find_fadt(&rsdp) {
-                self.fadt = Some(fadt);
-                self.enable_acpi(&fadt);
+        #[cfg(feature = "smp")]
+        {
+            if let Some(rsdp) = acpi::find_rsdp() {
+                if let Some(fadt) = acpi::find_fadt(&rsdp) {
+                    self.fadt = Some(fadt);
+                    self.enable_acpi(&fadt);
+                }
             }
+        }
+        #[cfg(not(feature = "smp"))]
+        {
+            self.fadt = Some(());
         }
     }
 
+    #[cfg(feature = "smp")]
     fn enable_acpi(&self, fadt: &Fadt) {
         // Init ACPI Mode if SMI_CMD is present and ACPI_ENABLE is set
         if fadt.smi_cmd != 0 && fadt.acpi_enable != 0 {
@@ -33,20 +50,23 @@ impl PowerManager {
     pub fn shutdown(&self) {
         crate::serial_println!("Shutting down...");
         
-        // 1. Try ACPI Shutdown (QEMU S5)
-        // Note: Proper way is to parse _S5 package in DSDT.
-        // For QEMU, SLP_TYP is typically 5 (001b << 10 for SLP_TYPa).
-        // Plus SLP_EN (1 << 13).
-        
-        // Fallback or QEMU-specific hardcoded values for S5
-        if let Some(fadt) = &self.fadt {
-             let pm1a_cnt_blk = fadt.pm1a_cnt_blk as u16;
-             let mut port: Port<u16> = Port::new(pm1a_cnt_blk);
-             
-             // Try QEMU S5 sequence
-             unsafe {
-                 port.write(0x2000 | (5 << 10)); // SLP_EN | SLP_TYP=5
-             }
+        #[cfg(feature = "smp")]
+        {
+            // 1. Try ACPI Shutdown (QEMU S5)
+            // Note: Proper way is to parse _S5 package in DSDT.
+            // For QEMU, SLP_TYP is typically 5 (001b << 10 for SLP_TYPa).
+            // Plus SLP_EN (1 << 13).
+            
+            // Fallback or QEMU-specific hardcoded values for S5
+            if let Some(fadt) = &self.fadt {
+                 let pm1a_cnt_blk = fadt.pm1a_cnt_blk as u16;
+                 let mut port: Port<u16> = Port::new(pm1a_cnt_blk);
+                 
+                 // Try QEMU S5 sequence
+                 unsafe {
+                     port.write(0x2000 | (5 << 10)); // SLP_EN | SLP_TYP=5
+                 }
+            }
         }
         
         // 2. QEMU specific shutdown port (older QEMU)

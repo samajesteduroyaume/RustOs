@@ -101,17 +101,43 @@ pub struct UFAT<D: Disk> {
     inode_count: u64,
     free_blocks: u64,
     free_inodes: u64,
-    // Autres champs de l'état du système de fichiers
+    blocks_per_group: u32,
+    inodes_per_group: u32,
 }
 
 impl<D: Disk> UFAT<D> {
     /// Crée une nouvelle instance de UFAT sur un périphérique de disque
     pub fn new(disk: D) -> Result<Self, FsError> {
-        // TODO: Vérifier si le disque est déjà formaté en UFAT
-        // Si non, initialiser une nouvelle structure de système de fichiers
+        // Lire le superbloc (offset 0)
+        let mut sb_buf = [0u8; 1024]; // Taille min
+        // Note: Disk trait read prend u64 offset.
+        // On suppose qu'on peut lire juste le début
+        let mut locked_disk = disk.lock(); // On a besoin de lock pour lire
+        // lock() returns MutexGuard.Disk? No, disk is D. UFAT has Mutex<D>.
+        // Wait, `disk` param is `D`. `self.disk` is `Mutex<D>`.
+        // So here `disk` is owned directly.
         
-        // Pour l'instant, retourner une erreur car non implémenté
-        Err(FsError::IOError)
+        // Read directly from disk
+        let mut buf = vec![0u8; 4096]; // Read first block (assuming 4k or less)
+        disk.read(0, &mut buf).map_err(|_| FsError::IOError)?;
+        
+        let sb_ptr = buf.as_ptr() as *const UfatSuperBlock;
+        let sb = unsafe { sb_ptr.read_unaligned() };
+        
+        if sb.magic != UFAT_MAGIC {
+            return Err(FsError::InvalidFilesystem);
+        }
+        
+        Ok(Self {
+            disk: Mutex::new(disk),
+            block_size: sb.block_size,
+            block_count: sb.block_count,
+            inode_count: sb.inode_count,
+            free_blocks: sb.free_blocks,
+            free_inodes: sb.free_inodes,
+            blocks_per_group: sb.blocks_per_group,
+            inodes_per_group: sb.inodes_per_group,
+        })
     }
     
     /// Formate un périphérique avec le système de fichiers UFAT
@@ -322,6 +348,324 @@ impl<D: Disk> UFAT<D> {
         Ok(())
     }
     
+    /// Alloue un bloc libre
+    fn allocate_block(&mut self) -> Result<u64, FsError> {
+        let groups_count = (self.block_count + self.blocks_per_group as u64 - 1) / self.blocks_per_group as u64;
+        let blocks_per_group = self.blocks_per_group as u64;
+
+        for group in 0..groups_count {
+            let bgd = self.read_bgd(group)?;
+            if bgd.free_blocks == 0 { continue; }
+
+            let bitmap_block = bgd.block_bitmap as u64;
+            let mut bitmap = vec![0u8; self.block_size as usize];
+            self.read_block(bitmap_block, &mut bitmap)?;
+            
+            for (byte_idx, &byte) in bitmap.iter().enumerate() {
+                if byte != 0xFF {
+                    for bit_idx in 0..8 {
+                        if (byte & (1 << bit_idx)) == 0 {
+                            let relative_block = (byte_idx * 8 + bit_idx) as u64;
+                            if relative_block >= blocks_per_group { break; }
+                            
+                            let absolute_block = group * blocks_per_group + relative_block;
+                            if absolute_block >= self.block_count { return Err(FsError::NoSpace); }
+
+                            let mut new_bitmap = bitmap.clone();
+                            new_bitmap[byte_idx] |= 1 << bit_idx;
+                            self.write_block(bitmap_block, &new_bitmap)?;
+                            
+                            // TODO: Mettre à jour free_blocks dans GDT et SB
+                            
+                            return Ok(absolute_block);
+                        }
+                    }
+                }
+            }
+        }
+        Err(FsError::NoSpace)
+    }
+
+    fn free_block(&mut self, block_num: u64) -> Result<(), FsError> {
+        let blocks_per_group = self.blocks_per_group as u64;
+        let group = block_num / blocks_per_group;
+        let relative_block = block_num % blocks_per_group;
+        
+        let bgd = self.read_bgd(group)?;
+        let bitmap_block = bgd.block_bitmap as u64;
+        
+        let mut bitmap = vec![0u8; self.block_size as usize];
+        self.read_block(bitmap_block, &mut bitmap)?;
+        
+        let byte_idx = (relative_block / 8) as usize;
+        let bit_idx = (relative_block % 8) as usize;
+        
+        bitmap[byte_idx] &= !(1 << bit_idx);
+        self.write_block(bitmap_block, &bitmap)?;
+        Ok(())
+    }
+
+    fn read_bgd(&self, group: u64) -> Result<BlockGroupDescriptor, FsError> {
+        let block_size = self.block_size as u64;
+        let bgd_size = core::mem::size_of::<BlockGroupDescriptor>() as u64;
+        
+        let gdt_start_block = 1; 
+        let entries_per_block = block_size / bgd_size;
+        let block_offset = group / entries_per_block;
+        let entry_offset = group % entries_per_block;
+        
+        let block_num = gdt_start_block + block_offset;
+        let mut buf = vec![0u8; block_size as usize];
+        self.read_block(block_num, &mut buf)?;
+        
+        let start = (entry_offset * bgd_size) as usize;
+        let end = start + bgd_size as usize;
+        
+        let ptr = buf[start..end].as_ptr() as *const BlockGroupDescriptor;
+        let bgd = unsafe { ptr.read_unaligned() };
+        Ok(bgd)
+    }
+
+    /// Lit un inode
+    fn read_inode(&self, inode_num: u64) -> Result<UfatInode, FsError> {
+        if inode_num == 0 || inode_num > self.inode_count {
+            return Err(FsError::InvalidInode);
+        }
+
+        let group = (inode_num - 1) / self.inodes_per_group as u64;
+        let index = (inode_num - 1) % self.inodes_per_group as u64;
+        
+        let bgd = self.read_bgd(group)?;
+        let inode_table_block = bgd.inode_table as u64;
+        let inode_size = core::mem::size_of::<UfatInode>() as u64;
+        
+        let block_offset = (index * inode_size) / self.block_size as u64;
+        let byte_offset = (index * inode_size) % self.block_size as u64;
+        
+        let mut buf = vec![0u8; self.block_size as usize];
+        self.read_block(inode_table_block + block_offset, &mut buf)?;
+        
+        let start = byte_offset as usize;
+        let end = start + inode_size as usize;
+        
+        let ptr = buf[start..end].as_ptr() as *const UfatInode;
+        let inode = unsafe { ptr.read_unaligned() };
+        
+        Ok(inode)
+    }
+
+    /// Écrit un inode
+    fn write_inode(&self, inode_num: u64, inode: &UfatInode) -> Result<(), FsError> {
+        if inode_num == 0 || inode_num > self.inode_count {
+            return Err(FsError::InvalidInode);
+        }
+
+        let group = (inode_num - 1) / self.inodes_per_group as u64;
+        let index = (inode_num - 1) % self.inodes_per_group as u64;
+        
+        let bgd = self.read_bgd(group)?;
+        let inode_table_block = bgd.inode_table as u64;
+        let inode_size = core::mem::size_of::<UfatInode>() as u64;
+        
+        let block_offset = (index * inode_size) / self.block_size as u64;
+        let byte_offset = (index * inode_size) % self.block_size as u64;
+        
+        let block_num = inode_table_block + block_offset;
+        let mut buf = vec![0u8; self.block_size as usize];
+        self.read_block(block_num, &mut buf)?;
+        
+        let inode_bytes = unsafe {
+            core::slice::from_raw_parts(
+                inode as *const _ as *const u8,
+                inode_size as usize,
+            )
+        };
+        
+        // Copier les octets de l'inode dans le buffer au bon offset
+        let start = byte_offset as usize;
+        buf[start..start + inode_size as usize].copy_from_slice(inode_bytes);
+        
+        self.write_block(block_num, &buf)?;
+        
+        Ok(())
+    }
+
+    /// Alloue un nouvel inode
+    fn allocate_inode(&mut self) -> Result<u64, FsError> {
+        let groups_count = (self.block_count + self.blocks_per_group as u64 - 1) / self.blocks_per_group as u64;
+
+        for group in 0..groups_count {
+            let bgd = self.read_bgd(group)?;
+            if bgd.free_inodes == 0 { continue; }
+            
+            let bitmap_block = bgd.inode_bitmap as u64;
+            let mut bitmap = vec![0u8; self.block_size as usize];
+            self.read_block(bitmap_block, &mut bitmap)?;
+            
+            for (byte_idx, &byte) in bitmap.iter().enumerate() {
+                if byte != 0xFF {
+                    for bit_idx in 0..8 {
+                        if (byte & (1 << bit_idx)) == 0 {
+                            let relative_inode = (byte_idx * 8 + bit_idx) as u64;
+                            if relative_inode >= self.inodes_per_group as u64 { break; }
+                            
+                            let absolute_inode = group * self.inodes_per_group as u64 + relative_inode + 1; // Inodes start at 1
+                            if absolute_inode > self.inode_count { return Err(FsError::NoSpace); }
+                            
+                            let mut new_bitmap = bitmap.clone();
+                            new_bitmap[byte_idx] |= 1 << bit_idx;
+                            self.write_block(bitmap_block, &new_bitmap)?;
+                            
+                            // TODO: Update GDT/SB free counts
+                            
+                            return Ok(absolute_inode);
+                        }
+                    }
+                }
+            }
+        }
+        Err(FsError::NoSpace)
+    }
+
+    /// Libère un inode
+    fn free_inode(&mut self, inode_num: u64) -> Result<(), FsError> {
+        if inode_num == 0 || inode_num > self.inode_count { return Err(FsError::InvalidInode); }
+        
+        let group = (inode_num - 1) / self.inodes_per_group as u64;
+        let index = (inode_num - 1) % self.inodes_per_group as u64;
+        
+        let bgd = self.read_bgd(group)?;
+        let inode_bitmap_block = bgd.inode_bitmap as u64;
+        
+        let mut bitmap = vec![0u8; self.block_size as usize];
+        self.read_block(inode_bitmap_block, &mut bitmap)?;
+        
+        let byte_idx = (index / 8) as usize;
+        let bit_idx = (index % 8) as usize;
+        
+        bitmap[byte_idx] &= !(1 << bit_idx);
+        self.write_block(inode_bitmap_block, &bitmap)?;
+        
+        Ok(())
+    }
+
+    /// Ajoute une entrée de répertoire
+    fn add_directory_entry(&mut self, parent_inode: u64, child_inode: u64, name: &str, file_type: u8) -> Result<(), FsError> {
+        let mut inode = self.read_inode(parent_inode)?;
+        let entry_size = core::mem::size_of::<DirEntry>();
+        
+        // Trouver un slot libre
+        for (i, &block_num) in inode.block.iter().enumerate().take(12) {
+             let block_num = if block_num == 0 {
+                 let new = self.allocate_block()?;
+                 inode.block[i] = new as u32;
+                 inode.blocks += 1;
+                 // Write updated inode immediately to save block alloc
+                 self.write_inode(parent_inode, &inode)?;
+                 new
+             } else {
+                 block_num as u64
+             };
+             
+             let mut buf = vec![0u8; self.block_size as usize];
+             self.read_block(block_num, &mut buf)?;
+             
+             let entries_in_block = self.block_size as usize / entry_size;
+             for j in 0..entries_in_block {
+                 let start = j * entry_size;
+                 let end = start + entry_size;
+                 
+                 // Check if empty (inode 0)
+                 let ptr = buf[start..end].as_ptr() as *const DirEntry;
+                 let entry = unsafe { ptr.read_unaligned() };
+                 
+                 if entry.inode == 0 {
+                     // Found slot
+                     let mut new_entry = DirEntry {
+                         inode: child_inode as u32,
+                         name_len: name.len() as u8,
+                         file_type,
+                         name: [0; 255],
+                     };
+                     new_entry.name[..name.len()].copy_from_slice(name.as_bytes());
+                     
+                     let entry_bytes = unsafe {
+                        core::slice::from_raw_parts(
+                            &new_entry as *const _ as *const u8,
+                            entry_size,
+                        )
+                     };
+                     buf[start..end].copy_from_slice(entry_bytes);
+                     self.write_block(block_num, &buf)?;
+                     return Ok(());
+                 }
+             }
+        }
+        
+        Err(FsError::NoSpace)
+    }
+
+    /// Lit les entrées d'un répertoire
+    fn read_directory_entries(&self, inode_num: u64) -> Result<Vec<DirEntry>, FsError> {
+        let inode = self.read_inode(inode_num)?;
+        let file_type = (inode.mode >> 12) as u8;
+        if file_type != UFAT_FT_DIR {
+             return Err(FsError::NotADirectory);
+        }
+        
+        let mut entries = Vec::new();
+        let entry_size = core::mem::size_of::<DirEntry>();
+        
+        for &block_num in inode.block.iter().take(12) {
+             if block_num == 0 { break; }
+             
+             let mut buf = vec![0u8; self.block_size as usize];
+             self.read_block(block_num as u64, &mut buf)?;
+             
+             let entries_in_block = self.block_size as usize / entry_size;
+             for i in 0..entries_in_block {
+                 let start = i * entry_size;
+                 let end = start + entry_size;
+                 let ptr = buf[start..end].as_ptr() as *const DirEntry;
+                 let entry = unsafe { ptr.read_unaligned() };
+                 
+                 if entry.inode != 0 {
+                     entries.push(entry);
+                 }
+             }
+        }
+        Ok(entries)
+    }
+
+    /// Résout un chemin vers un inode
+    fn resolve_path(&self, path: &str) -> Result<u64, FsError> {
+        if path == "/" || path.is_empty() { return Ok(1); } // Root inode
+        
+        let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let mut current_inode = 1;
+        
+        for part in parts {
+            let entries = self.read_directory_entries(current_inode)?;
+            let mut found = false;
+            
+            for entry in entries {
+                let len = entry.name_len as usize;
+                if len > MAX_FILENAME_LENGTH { continue; }
+                
+                let name = &entry.name[..len];
+                if name == part.as_bytes() {
+                    current_inode = entry.inode as u64;
+                    found = true;
+                    break;
+                }
+            }
+            
+            if !found { return Err(FsError::NotFound); }
+        }
+        
+        Ok(current_inode)
+    }
+
     // Méthodes internes d'aide
     fn read_block(&self, block_num: u64, buf: &mut [u8]) -> Result<(), FsError> {
         let mut disk = self.disk.lock();
@@ -339,28 +683,179 @@ impl<D: Disk> UFAT<D> {
 // Implémentation du trait FileSystem pour UFAT
 impl<D: Disk> crate::filesystem::FileSystem for UFAT<D> {
     fn read_dir(&self, path: &str) -> Result<Vec<String>, FsError> {
-        // TODO: Implémenter la lecture de répertoire
-        Err(FsError::IOError)
+        let inode_num = self.resolve_path(path)?;
+        let entries = self.read_directory_entries(inode_num)?;
+        
+        let mut names = Vec::new();
+        for entry in entries {
+            let len = entry.name_len as usize;
+            if len <= MAX_FILENAME_LENGTH {
+                if let Ok(s) = core::str::from_utf8(&entry.name[..len]) {
+                    names.push(String::from(s));
+                }
+            }
+        }
+        Ok(names)
     }
     
     fn read_file(&self, path: &str) -> Result<Vec<u8>, FsError> {
-        // TODO: Implémenter la lecture de fichier
-        Err(FsError::IOError)
+        let inode_num = self.resolve_path(path)?;
+        let inode = self.read_inode(inode_num)?;
+        
+        let file_type = (inode.mode >> 12) as u8;
+        if file_type == UFAT_FT_DIR {
+            return Err(FsError::NotAFile);
+        }
+        
+        let mut content = Vec::new();
+        let mut remaining = inode.size as usize;
+        
+        // Read direct blocks
+        for &block_num in inode.block.iter().take(12) {
+            if block_num == 0 || remaining == 0 { break; }
+            
+            let mut buf = vec![0u8; self.block_size as usize];
+            self.read_block(block_num as u64, &mut buf)?;
+            
+            let to_read = remaining.min(self.block_size as usize);
+            content.extend_from_slice(&buf[..to_read]);
+            remaining -= to_read;
+        }
+        
+        Ok(content)
     }
     
     fn write_file(&mut self, path: &str, content: &[u8]) -> Result<(), FsError> {
-        // TODO: Implémenter l'écriture de fichier
-        Err(FsError::IOError)
+        let inode_num = self.resolve_path(path)?;
+        let mut inode = self.read_inode(inode_num)?;
+        
+        let file_type = (inode.mode >> 12) as u8;
+        if file_type == UFAT_FT_DIR {
+            return Err(FsError::NotAFile);
+        }
+        
+        let mut remaining = content.len();
+        let mut offset = 0;
+        let mut block_idx = 0;
+        
+        while remaining > 0 {
+            if block_idx >= 12 {
+                // TODO: Support indirect blocks
+                return Err(FsError::NoSpace); // Limit for now
+            }
+            
+            let block_num = if inode.block[block_idx] == 0 {
+                // Allouer un nouveau bloc
+                let new_block = self.allocate_block()?;
+                inode.block[block_idx] = new_block as u32;
+                inode.blocks += 1;
+                new_block
+            } else {
+                inode.block[block_idx] as u64
+            };
+            
+            let to_write = remaining.min(self.block_size as usize);
+            let mut buf = vec![0u8; self.block_size as usize];
+            
+            // Copier les données
+            buf[..to_write].copy_from_slice(&content[offset..offset + to_write]);
+            self.write_block(block_num, &buf)?;
+            
+            remaining -= to_write;
+            offset += to_write;
+            block_idx += 1;
+        }
+        
+        inode.size = content.len() as u64;
+        self.write_inode(inode_num, &inode)?;
+        
+        Ok(())
     }
     
     fn create_file(&mut self, path: &str, content: &[u8]) -> Result<(), FsError> {
-        // TODO: Implémenter la création de fichier
-        Err(FsError::IOError)
+        if self.exists(path) { return Err(FsError::AlreadyExists); }
+        
+        let path_string = String::from(path);
+        let parts: Vec<&str> = path_string.rsplitn(2, '/').collect();
+        let (filename, parent_path) = if parts.len() == 2 {
+            (parts[0], parts[1])
+        } else {
+            (parts[0], if path.starts_with('/') { "/" } else { "." })
+        };
+        let parent_path = if parent_path.is_empty() { "/" } else { parent_path };
+        
+        let parent_inode_num = self.resolve_path(parent_path)?;
+        let new_inode_num = self.allocate_inode()?;
+        
+        let inode = UfatInode {
+            mode: 0o644 | ((UFAT_FT_REG_FILE as u16) << 12),
+            uid: 0,
+            size: 0,
+            atime: 0, ctime: 0, mtime: 0,
+            blocks: 0, flags: 0,
+            block: [0; 15], checksum: 0, reserved: [0; 16],
+        };
+        self.write_inode(new_inode_num, &inode)?;
+        
+        self.add_directory_entry(parent_inode_num, new_inode_num, filename, UFAT_FT_REG_FILE)?;
+        
+        self.write_file(path, content)
     }
     
     fn create_dir(&mut self, path: &str) -> Result<(), FsError> {
-        // TODO: Implémenter la création de répertoire
-        Err(FsError::IOError)
+        if self.exists(path) { return Err(FsError::AlreadyExists); }
+        
+        let path_string = String::from(path);
+        let parts: Vec<&str> = path_string.rsplitn(2, '/').collect();
+        let (filename, parent_path) = if parts.len() == 2 {
+            (parts[0], parts[1])
+        } else {
+            (parts[0], if path.starts_with('/') { "/" } else { "." })
+        };
+        let parent_path = if parent_path.is_empty() { "/" } else { parent_path };
+        
+        let parent_inode_num = self.resolve_path(parent_path)?;
+        let new_inode_num = self.allocate_inode()?;
+        
+        let mut inode = UfatInode {
+            mode: 0o755 | ((UFAT_FT_DIR as u16) << 12),
+            uid: 0,
+            size: self.block_size as u64,
+            atime: 0, ctime: 0, mtime: 0,
+            blocks: 1, flags: 0,
+            block: [0; 15], checksum: 0, reserved: [0; 16],
+        };
+        
+        let block_num = self.allocate_block()?;
+        inode.block[0] = block_num as u32;
+        self.write_inode(new_inode_num, &inode)?;
+        
+        // Init directory with . and ..
+        let dot = DirEntry {
+             inode: new_inode_num as u32,
+             name_len: 1, file_type: UFAT_FT_DIR,
+             name: { let mut n = [0; 255]; n[0] = b'.'; n },
+        };
+        let dotdot = DirEntry {
+             inode: parent_inode_num as u32,
+             name_len: 2, file_type: UFAT_FT_DIR,
+             name: { let mut n = [0; 255]; n[0] = b'.'; n[1] = b'.'; n },
+        };
+        
+        let mut buf = vec![0u8; self.block_size as usize];
+        
+        // Manual copy to avoid unsafe ptr arithmetic if possible, or just be careful
+        let entry_size = core::mem::size_of::<DirEntry>();
+         unsafe {
+            let ptr = buf.as_mut_ptr() as *mut DirEntry;
+            *ptr.add(0) = dot;
+            *ptr.add(1) = dotdot;
+        }
+        self.write_block(block_num, &buf)?;
+        
+        self.add_directory_entry(parent_inode_num, new_inode_num, filename, UFAT_FT_DIR)?;
+        
+        Ok(())
     }
     
     fn remove_file(&mut self, path: &str) -> Result<(), FsError> {
@@ -374,17 +869,24 @@ impl<D: Disk> crate::filesystem::FileSystem for UFAT<D> {
     }
     
     fn exists(&self, path: &str) -> bool {
-        // TODO: Implémenter la vérification d'existence
-        false
+        self.resolve_path(path).is_ok()
     }
     
     fn is_file(&self, path: &str) -> bool {
-        // TODO: Implémenter la vérification de type fichier
+        if let Ok(inode_num) = self.resolve_path(path) {
+            if let Ok(inode) = self.read_inode(inode_num) {
+                return ((inode.mode >> 12) as u8) == UFAT_FT_REG_FILE;
+            }
+        }
         false
     }
     
     fn is_dir(&self, path: &str) -> bool {
-        // TODO: Implémenter la vérification de type répertoire
+        if let Ok(inode_num) = self.resolve_path(path) {
+            if let Ok(inode) = self.read_inode(inode_num) {
+                return ((inode.mode >> 12) as u8) == UFAT_FT_DIR;
+            }
+        }
         false
     }
 }

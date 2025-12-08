@@ -18,16 +18,13 @@ name = "ramfs_tests"
 path = "tests/ramfs_tests.rs"
 harness = false
 
-[[bin]]
-name = "test-kernel"
-path = "src/bin/test_kernel.rs"
-test = false
 
 [features]
 default = ["alloc", "usb", "bluetooth"]
 alloc = []
 usb = []
 bluetooth = []
+smp = []  # SMP support (optional, disabled by default due to trampoline issues)
 test-mode = []  # Mode test pour QEMU
 
 [dependencies]
@@ -44,9 +41,6 @@ uart_16550 = "0.2.0"
 
 # Pour le support de l'allocation
 linked_list_allocator = { version = "0.10.1", optional = true }
-
-# Pour le support du débogage
-bootloader = { version = "0.9.23" }
 
 # Pour le support du système de fichiers
 vfs = { version = "0.8.0", optional = true }
@@ -65,13 +59,4 @@ opt-level = 3
 lto = true
 codegen-units = 1
 
-# Configuration bootimage pour les tests QEMU
-[package.metadata.bootimage]
-test-args = [
-    "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-    "-serial", "stdio",
-    "-display", "none",
-    "-no-reboot"
-]
-test-success-exit-code = 33  # (0x10 << 1) | 1
-test-timeout = 300  # 5 minutes
+# Configuration bootimage pour les tests QEMU (legacy - may be removed)

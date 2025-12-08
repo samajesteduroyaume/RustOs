@@ -1,4 +1,5 @@
 use crate::vga_buffer::WRITER;
+use x86_64::instructions::port::Port;
 
 /// Classe PCI
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,16 +119,38 @@ impl PciEnumerator {
         devices
     }
 
-    /// Lit une configuration PCI
+    /// Lit une configuration PCI (32 bits)
     pub fn read_config(bus: u8, slot: u8, function: u8, offset: u8) -> u32 {
-        // TODO: Implémenter la lecture PCI
-        // Pour l'instant, retourner 0
-        0
+        let address = 0x80000000
+            | ((bus as u32) << 16)
+            | ((slot as u32) << 11)
+            | ((function as u32) << 8)
+            | ((offset as u32) & 0xFC);
+        
+        unsafe {
+            let mut port_address = Port::<u32>::new(0xCF8);
+            let mut port_data = Port::<u32>::new(0xCFC);
+            
+            port_address.write(address);
+            port_data.read()
+        }
     }
 
-    /// Écrit une configuration PCI
+    /// Écrit une configuration PCI (32 bits)
     pub fn write_config(bus: u8, slot: u8, function: u8, offset: u8, value: u32) {
-        // TODO: Implémenter l'écriture PCI
+        let address = 0x80000000
+            | ((bus as u32) << 16)
+            | ((slot as u32) << 11)
+            | ((function as u32) << 8)
+            | ((offset as u32) & 0xFC);
+            
+        unsafe {
+            let mut port_address = Port::<u32>::new(0xCF8);
+            let mut port_data = Port::<u32>::new(0xCFC);
+            
+            port_address.write(address);
+            port_data.write(value);
+        }
     }
 
     /// Affiche tous les périphériques PCI

@@ -24,8 +24,8 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: Interrupt
                 }
                 DecodedKey::RawKey(code) => {
                     match code {
-                        KeyCode::F11 => crate::power::reboot(),
-                        KeyCode::F12 => crate::power::shutdown(),
+                        // KeyCode::F11 => mini_os::power::reboot(),
+                        // KeyCode::F12 => mini_os::power::shutdown(),
                         _ => {}
                     }
                 }

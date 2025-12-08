@@ -71,8 +71,12 @@ impl SyscallHandler {
         match num {
             x if x == SyscallNumber::Exit as u64 => self.handle_exit(args[0] as i32),
             x if x == SyscallNumber::Fork as u64 => self.handle_fork(),
+            x if x == SyscallNumber::Exec as u64 => self.handle_exec(args[0] as *const u8),
+            x if x == SyscallNumber::Wait as u64 => self.handle_wait(args[0] as i64),
             x if x == SyscallNumber::Read as u64 => self.handle_read(args[0] as usize, args[1] as *mut u8, args[2] as usize),
             x if x == SyscallNumber::Write as u64 => self.handle_write(args[0] as usize, args[1] as *const u8, args[2] as usize),
+            x if x == SyscallNumber::Open as u64 => self.handle_open(args[0] as *const u8, args[1] as i32),
+            x if x == SyscallNumber::Close as u64 => self.handle_close(args[0] as usize),
             x if x == SyscallNumber::GetPid as u64 => self.handle_getpid(),
             x if x == SyscallNumber::SetPriority as u64 => self.handle_set_priority(args[0], args[1] as u8),
             x if x == SyscallNumber::GetPriority as u64 => self.handle_get_priority(args[0]),
@@ -96,24 +100,244 @@ impl SyscallHandler {
         }
     }
     
-    fn handle_exit(&self, _status: i32) -> SyscallResult {
-        // TODO: Implémenter la terminaison du processus
-        SyscallResult::Success(0)
+    fn handle_exit(&self, status: i32) -> SyscallResult {
+        use crate::process::{PROCESS_MANAGER, current_process};
+        
+        let pid = match current_process() {
+            Some(p) => p.lock().pid,
+            None => return SyscallResult::Error(SyscallError::NoSuchProcess),
+        };
+        
+        match PROCESS_MANAGER.lock().terminate_process(pid, status) {
+            Ok(_) => SyscallResult::Success(0),
+            Err(_) => SyscallResult::Error(SyscallError::NoSuchProcess),
+        }
     }
     
     fn handle_fork(&self) -> SyscallResult {
-        // TODO: Implémenter la création d'un nouveau processus
+        use crate::process::PROCESS_MANAGER;
+        use crate::scheduler::current_thread;
+        
+        let tid = match current_thread() {
+            Some(t) => t.lock().tid,
+            None => return SyscallResult::Error(SyscallError::NoSuchProcess),
+        };
+        
+        match PROCESS_MANAGER.lock().fork_process(tid) {
+            Ok(pid) => SyscallResult::Success(pid),
+            Err(_) => SyscallResult::Error(SyscallError::OutOfMemory),
+        }
+    }
+
+    fn handle_exec(&self, path_ptr: *const u8) -> SyscallResult {
+        use crate::process::PROCESS_MANAGER;
+        use crate::scheduler::current_thread;
+        
+        let path = match self.read_user_string(path_ptr) {
+            Some(s) => s,
+            None => return SyscallResult::Error(SyscallError::InvalidArgument),
+        };
+        
+        let tid = match current_thread() {
+            Some(t) => t.lock().tid,
+            None => return SyscallResult::Error(SyscallError::NoSuchProcess),
+        };
+        
+        match PROCESS_MANAGER.lock().exec_process(tid, &path) {
+            Ok(_) => SyscallResult::Success(0),
+            Err(_) => SyscallResult::Error(SyscallError::IoError),
+        }
+    }
+
+    fn handle_wait(&self, _pid: i64) -> SyscallResult {
+        // TODO: Implémenter wait
         SyscallResult::Error(SyscallError::NotSupported)
     }
     
-    fn handle_read(&self, _fd: usize, _buf: *mut u8, _count: usize) -> SyscallResult {
-        // TODO: Implémenter la lecture depuis un descripteur de fichier
-        SyscallResult::Error(SyscallError::NotSupported)
+    fn handle_read(&self, fd: usize, buf_ptr: *mut u8, count: usize) -> SyscallResult {
+         use crate::process::current_process;
+         use crate::fs::{FD_MANAGER, path_lookup, Dentry};
+         use alloc::sync::Arc;
+         use spin::Mutex;
+         
+         let pid = match current_process() {
+            Some(p) => p.lock().pid,
+            None => return SyscallResult::Error(SyscallError::NoSuchProcess),
+         };
+         
+         let mut fm = FD_MANAGER.lock();
+         let (path, offset) = if let Ok(table) = fm.get_table(pid) {
+             if let Ok(desc) = table.get(fd) {
+                 (desc.path.clone(), desc.offset)
+             } else {
+                 return SyscallResult::Error(SyscallError::InvalidArgument);
+             }
+         } else {
+             return SyscallResult::Error(SyscallError::IoError);
+         };
+         drop(fm);
+         
+         let dentry: Arc<Mutex<Dentry>> = match path_lookup(&path) {
+             Ok(d) => d,
+             Err(_) => return SyscallResult::Error(SyscallError::NotFound),
+         };
+         
+         let inode = dentry.lock().inode.clone();
+         
+         let inode = dentry.lock().inode.clone();
+         
+         let mut temp_buf = alloc::vec![0u8; count];
+         let read_bytes = match inode.lock().ops.lock().read(offset, &mut temp_buf) {
+             Ok(n) => n,
+             Err(_) => return SyscallResult::Error(SyscallError::IoError),
+         };
+         
+         let mut fm = FD_MANAGER.lock();
+         if let Ok(table) = fm.get_table(pid) {
+             if let Ok(desc) = table.get_mut(fd) {
+                 desc.offset += read_bytes as u64;
+             }
+         }
+         
+         unsafe {
+             core::ptr::copy_nonoverlapping(temp_buf.as_ptr(), buf_ptr, read_bytes);
+         }
+         
+         SyscallResult::Success(read_bytes as u64)
     }
     
-    fn handle_write(&self, _fd: usize, _buf: *const u8, _count: usize) -> SyscallResult {
-        // TODO: Implémenter l'écriture vers un descripteur de fichier
-        SyscallResult::Error(SyscallError::NotSupported)
+    fn handle_write(&self, fd: usize, buf_ptr: *const u8, count: usize) -> SyscallResult {
+         use crate::process::current_process;
+         use crate::fs::{FD_MANAGER, path_lookup, Dentry};
+         use alloc::sync::Arc;
+         use spin::Mutex;
+         
+         let pid = match current_process() {
+            Some(p) => p.lock().pid,
+            None => return SyscallResult::Error(SyscallError::NoSuchProcess),
+         };
+         
+         let mut temp_buf = alloc::vec![0u8; count];
+         unsafe {
+             core::ptr::copy_nonoverlapping(buf_ptr, temp_buf.as_mut_ptr(), count);
+         }
+
+         let mut fm = FD_MANAGER.lock();
+         let (path, offset) = if let Ok(table) = fm.get_table(pid) {
+             if let Ok(desc) = table.get(fd) {
+                 (desc.path.clone(), desc.offset)
+             } else {
+                 return SyscallResult::Error(SyscallError::InvalidArgument);
+             }
+         } else {
+             return SyscallResult::Error(SyscallError::IoError);
+         };
+         drop(fm);
+         
+         let dentry: Arc<Mutex<Dentry>> = match path_lookup(&path) {
+             Ok(d) => d,
+             Err(_) => return SyscallResult::Error(SyscallError::NotFound),
+         };
+         
+         let inode = dentry.lock().inode.clone();
+         
+         let wrote_bytes = match inode.lock().ops.lock().write(offset, &temp_buf) {
+             Ok(n) => n,
+             Err(_) => return SyscallResult::Error(SyscallError::IoError),
+         };
+         
+         let mut fm = FD_MANAGER.lock();
+         if let Ok(table) = fm.get_table(pid) {
+             if let Ok(desc) = table.get_mut(fd) {
+                 desc.offset += wrote_bytes as u64;
+             }
+         }
+         
+         SyscallResult::Success(wrote_bytes as u64)
+    }
+
+    fn handle_open(&self, path_ptr: *const u8, flags: i32) -> SyscallResult {
+        use crate::process::current_process;
+        use crate::fs::{FD_MANAGER, OpenMode, Dentry};
+        use crate::fs::path_lookup;
+        use alloc::string::String;
+        use alloc::sync::Arc;
+        use spin::Mutex;
+        
+        let path = match self.read_user_string(path_ptr) {
+            Some(s) => s,
+            None => return SyscallResult::Error(SyscallError::InvalidArgument),
+        };
+        
+        let pid = match current_process() {
+            Some(p) => p.lock().pid,
+            None => return SyscallResult::Error(SyscallError::NoSuchProcess),
+        };
+        
+         let size = match path_lookup(&path) {
+             Ok(dentry) => {
+                 let dentry: Arc<Mutex<Dentry>> = dentry;
+                 let inode = dentry.lock().inode.clone();
+                 let inode = dentry.lock().inode.clone();
+                 let s = match inode.lock().ops.lock().stat() {
+                     Ok(stat) => stat.size,
+                     Err(_) => 0,
+                 };
+                 s
+             },
+             Err(_) => return SyscallResult::Error(SyscallError::NotFound),
+        };
+
+        let mode = match flags & 3 {
+            0 => OpenMode::ReadOnly,
+            1 => OpenMode::WriteOnly,
+            2 => OpenMode::ReadWrite,
+            _ => OpenMode::ReadOnly,
+        };
+        
+        let mut fm = FD_MANAGER.lock();
+        if let Ok(table) = fm.get_table(pid) {
+            match table.open(&path, mode, size) {
+                Ok(fd) => SyscallResult::Success(fd as u64),
+                Err(_) => SyscallResult::Error(SyscallError::IoError),
+            }
+        } else {
+            SyscallResult::Error(SyscallError::IoError)
+        }
+    }
+
+    fn handle_close(&self, fd: usize) -> SyscallResult {
+        use crate::process::current_process;
+        use crate::fs::FD_MANAGER;
+        
+        let pid = match current_process() {
+            Some(p) => p.lock().pid,
+            None => return SyscallResult::Error(SyscallError::NoSuchProcess),
+        };
+        
+        let mut fm = FD_MANAGER.lock();
+        if let Ok(table) = fm.get_table(pid) {
+            match table.close(fd) {
+                Ok(_) => SyscallResult::Success(0),
+                Err(_) => SyscallResult::Error(SyscallError::InvalidArgument),
+            }
+        } else {
+            SyscallResult::Error(SyscallError::IoError)
+        }
+    }
+
+    fn read_user_string(&self, ptr: *const u8) -> Option<alloc::string::String> {
+        if ptr.is_null() { return None; }
+        let mut bytes = alloc::vec::Vec::new();
+        let mut offset = 0;
+        loop {
+            let byte = unsafe { *ptr.add(offset) };
+            if byte == 0 { break; }
+            bytes.push(byte);
+            offset += 1;
+            if offset > 1024 { return None; }
+        }
+        alloc::string::String::from_utf8(bytes).ok()
     }
     
     fn handle_getpid(&self) -> SyscallResult {

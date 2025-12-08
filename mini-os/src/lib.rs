@@ -29,10 +29,15 @@ pub mod process;
 pub mod scheduler;
 pub mod syscall;
 pub mod fs;
+#[cfg(feature = "smp")]
 pub mod acpi;
+#[cfg(feature = "smp")]
 pub mod smp;
 pub mod fat32;
 pub mod ext2;
+pub mod ext3;
+pub mod ext4;
+pub mod fs_manager;  // Gestionnaire EXT4
 pub mod gpt;
 pub mod ring3;
 pub mod ring3_memory;
@@ -41,6 +46,7 @@ pub mod vga_buffer;  // ← Ajouté pour les drivers
 pub mod drivers;
 pub mod net;
 pub mod ipc;
+// pub mod vm; // Disabled - depends on Limine
 
 // Modules pour les tests QEMU
 #[macro_use]

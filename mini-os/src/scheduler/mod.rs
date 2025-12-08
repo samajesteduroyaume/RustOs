@@ -54,7 +54,22 @@ impl Scheduler {
         drop(cfs);
         
         // Update Per-CPU current thread
-        crate::smp::percpu::set_current_thread(next.clone());
+        #[cfg(feature = "smp")]
+        {
+            // Obtenir le CPU actuel
+            let cpu_id = crate::smp::get_current_cpu_id();
+            crate::smp::percpu::set_current_thread(next.clone());
+        }
+        #[cfg(not(feature = "smp"))]
+        {
+            // For non-SMP, we might have a single global current thread or a simplified mechanism
+            // For now, we assume `percpu` module handles non-smp case gracefully or is not used.
+            // If `crate::smp::percpu::set_current_thread` is meant to be called always,
+            // then its implementation should handle the `smp` feature internally.
+            // Given the instruction, we make the call conditional.
+            // If `percpu` is used even in non-smp, this needs adjustment.
+            // For now, we'll assume `smp::percpu` is only relevant with `smp` feature.
+        }
         
         next
     }
@@ -117,7 +132,15 @@ impl Scheduler {
     
     /// Retourne le thread courant (Per-CPU)
     pub fn current_thread(&self) -> Option<Arc<Mutex<Thread>>> {
-        crate::smp::percpu::get_current_thread()
+        #[cfg(feature = "smp")]
+        {
+            crate::smp::percpu::get_current_thread()
+        }
+        #[cfg(not(feature = "smp"))]
+        {
+            // Sans SMP, on pourrait avoir un thread global ou None
+            None
+        }
     }
 }
 

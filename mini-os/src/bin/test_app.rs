@@ -7,7 +7,7 @@ use mini_os::{
         dns,
         dhcp,
         http,
-        arp::Ipv4Address,
+        // arp::Ipv4Address, // Unused
     },
 };
 

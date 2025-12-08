@@ -10,6 +10,8 @@ use x86_64::{
     PhysAddr, VirtAddr,
 };
 use alloc::vec::Vec;
+use alloc::string::String;
+// use crate::memory::vm::{AddressSpace, VMManager, VM_MANAGER}; // Disabled - depends on Limine
 
 /// Espace d'adressage utilisateur
 pub struct UserAddressSpace {
